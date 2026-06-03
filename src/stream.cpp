@@ -1100,7 +1100,11 @@ namespace stream {
         BOOST_LOG(warning) << "IDX_LOSS_STATS: payload too small"sv;
         return;
       }
-      int32_t *stats = (int32_t *) payload.data();
+      // Copy out of the unaligned ENet payload — reinterpreting payload.data()
+      // as int32_t* is UB on unaligned data (and faults on ARM), the same fix
+      // applied to IDX_INPUT_DATA below.
+      int32_t stats[4];
+      std::memcpy(stats, payload.data(), sizeof(stats));
       auto count = stats[0];
       std::chrono::milliseconds t {stats[1]};
 
@@ -1132,7 +1136,8 @@ namespace stream {
         BOOST_LOG(warning) << "IDX_INVALIDATE_REF_FRAMES: payload too small"sv;
         return;
       }
-      auto frames = (std::int64_t *) payload.data();
+      std::int64_t frames[2];
+      std::memcpy(frames, payload.data(), sizeof(frames));
       auto firstFrame = frames[0];
       auto lastFrame = frames[1];
 
@@ -1251,6 +1256,13 @@ namespace stream {
     // Feature 5: Handle WiFi quality reports from custom Apollo client
     server->map(packetTypes[IDX_WIFI_QUALITY], [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_WIFI_QUALITY]"sv;
+
+      // Honor the config toggle — previously this telemetry was always
+      // processed regardless of wifi_quality_signaling, making the option a
+      // no-op that misled operators into thinking they'd disabled it.
+      if (!config::stream.wifi_quality_signaling) {
+        return;
+      }
 
       if (payload.size() < 4) {
         BOOST_LOG(warning) << "IDX_WIFI_QUALITY: payload too small"sv;

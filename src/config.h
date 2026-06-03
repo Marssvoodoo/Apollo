@@ -294,7 +294,7 @@ namespace config {
     std::string username;
     std::string password;
     std::string salt;
-    int hash_version = 1;  // 1 = single SHA-256, 2 = iterated (100k rounds)
+    int hash_version = 1;  // 1 = single SHA-256, 2 = iterated 100k (legacy read-compat), 3 = PBKDF2-HMAC-SHA256 600k (current)
 
     std::string config_file;
 

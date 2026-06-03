@@ -246,8 +246,13 @@ namespace stream {
           (_prev_wifi_quality - _wifi_quality) >= _cfg.wifi_preemptive_drop_threshold) {
         _wifi_preemptive_active = true;
       }
-      else if (_wifi_quality >= 3) {
-        // Quality recovered to GOOD or better
+      else if (_wifi_quality >= 3 || _wifi_quality >= _prev_wifi_quality) {
+        // Recover when quality reaches GOOD (>=3), OR when it stops dropping
+        // (stable/improving this sample). The preemptive clamp reacts to a
+        // *rapid drop*; without the second condition a link that settles at a
+        // mediocre-but-stable tier (e.g. 2) stayed clamped to 60% forever
+        // because quality never climbed back to 3. Once stable, the normal
+        // loss-driven adaptive path takes over.
         _wifi_preemptive_active = false;
       }
 

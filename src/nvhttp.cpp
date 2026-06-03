@@ -751,6 +751,19 @@ namespace nvhttp {
   // Append a single line to the security audit log alongside other Apollo
   // state files (platf::appdata() — same dir as sunshine.conf / apps.json).
   // Failures are logged once and swallowed; we never block pairing on this.
+  // Strip CR/LF and other control characters from client-controlled fields
+  // before they reach the audit log, so a crafted device name / uniqueID
+  // cannot inject newlines and forge or overwrite AUTO_PAIR records (which
+  // would defeat the log's tamper-evidence).
+  static std::string audit_sanitize(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+      out.push_back((c < 0x20 || c == 0x7f) ? '?' : static_cast<char>(c));
+    }
+    return out;
+  }
+
   static void append_audit_log(const std::string &line) {
     static std::mutex audit_mutex;
     static std::atomic<bool> warned_open_failure {false};
@@ -941,9 +954,9 @@ namespace nvhttp {
           {
             std::ostringstream ev;
             ev << iso8601_utc_now()
-               << " AUTO_PAIR client=" << ptr->second.client.name
+               << " AUTO_PAIR client=" << audit_sanitize(ptr->second.client.name)
                << " ip=" << client_ip
-               << " uid=" << ptr->second.client.uniqueID;
+               << " uid=" << audit_sanitize(ptr->second.client.uniqueID);
             append_audit_log(ev.str());
           }
           getservercert(ptr->second, tree, "0000");

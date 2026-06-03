@@ -537,11 +537,15 @@ namespace config {
     ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
 
-    // Adaptive streaming
-    true,   // adaptive_bitrate
-    true,   // adaptive_fec
-    true,   // frame_pacing
-    true,   // thermal_protection
+    // Adaptive streaming — opt-in. These default OFF: frame_pacing injects
+    // up to max_pacing_buffer_ms of sleep on the video send thread per frame,
+    // thermal_protection silently steps down resolution/fps, and the NVENC
+    // bitrate reconfigure path is intentionally hard-refused, so leave the
+    // suite off until a user explicitly enables it in the web UI.
+    false,  // adaptive_bitrate
+    false,  // adaptive_fec
+    false,  // frame_pacing
+    false,  // thermal_protection
     2000,   // min_bitrate
     40000,  // max_bitrate
     10,     // min_fec_percentage

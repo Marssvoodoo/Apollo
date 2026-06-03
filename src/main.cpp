@@ -303,6 +303,13 @@ int main(int argc, char *argv[]) {
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
       logging::log_flush();
+#ifdef _WIN32
+      // Belt-and-suspenders: restore the user's display topology before the hard
+      // abort below. abort() does NOT run static destructors, so without this a
+      // force-shutdown (after a hung terminate()) would leave the user's physical
+      // monitors deactivated — a black screen needing Win+P / registry recovery.
+      VDISPLAY::topology_snapshot_slot().reset();
+#endif
       lifetime::debug_trap();
     };
 
@@ -320,8 +327,21 @@ int main(int argc, char *argv[]) {
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
       logging::log_flush();
+#ifdef _WIN32
+      // Belt-and-suspenders: restore the user's display topology before the hard
+      // abort below. abort() does NOT run static destructors, so without this a
+      // force-shutdown (after a hung terminate()) would leave the user's physical
+      // monitors deactivated — a black screen needing Win+P / registry recovery.
+      VDISPLAY::topology_snapshot_slot().reset();
+#endif
       lifetime::debug_trap();
     };
+
+    // Match SIGINT: explicitly terminate the running process so the display
+    // topology snapshot is restored (.reset()) on the graceful path, instead
+    // of relying solely on a static destructor that the force-abort skips.
+    proc::proc.terminate();
+
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
 
     shutdown_event->raise(true);

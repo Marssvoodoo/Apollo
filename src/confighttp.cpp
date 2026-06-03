@@ -73,7 +73,12 @@ namespace confighttp {
   // LOGIN RATE LIMITING (per-IP)
   static constexpr int MAX_LOGIN_ATTEMPTS = 5;
   static constexpr auto LOGIN_LOCKOUT_DURATION = 5min;
-  static std::unordered_map<std::string, std::pair<int, std::chrono::steady_clock::time_point>> login_attempts_by_ip;
+  struct login_attempt_t {
+    int fail_count = 0;
+    std::chrono::steady_clock::time_point lockout_until {};  // set once on the MAX-th failure
+    std::chrono::steady_clock::time_point last_attempt {};   // updated every failure; drives pruning
+  };
+  static std::unordered_map<std::string, login_attempt_t> login_attempts_by_ip;
 
   // Reduce a remote address to a "lockout key" — for IPv6 we drop the
   // last 64 bits so privacy-extension /128 rotation can't bypass the
@@ -1435,7 +1440,7 @@ namespace confighttp {
    * @api_examples{/api/otp| GET| null}
    */
   void getOTP(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request) || !verifyCsrf(response, request)) {
       return;
     }
 
@@ -1712,10 +1717,14 @@ namespace confighttp {
     {
       std::lock_guard<std::mutex> lock(session_mutex);
 
-      // Prune expired entries to prevent unbounded growth
+      // Prune entries idle longer than the lockout window. Pruning must key
+      // off last activity, NOT lockout_until: lockout_until stays unset (the
+      // steady_clock epoch) for entries below MAX, so pruning on it deleted
+      // the counter on the next request and the 5-attempt lockout never
+      // engaged on any host with >5 min uptime.
       auto now = std::chrono::steady_clock::now();
       for (auto it = login_attempts_by_ip.begin(); it != login_attempts_by_ip.end();) {
-        if (now >= it->second.second + LOGIN_LOCKOUT_DURATION) {
+        if (now - it->second.last_attempt >= LOGIN_LOCKOUT_DURATION) {
           it = login_attempts_by_ip.erase(it);
         } else {
           ++it;
@@ -1724,8 +1733,8 @@ namespace confighttp {
 
       auto it = login_attempts_by_ip.find(address_key);
       if (it != login_attempts_by_ip.end()) {
-        auto &[fail_count, lockout_until] = it->second;
-        if (fail_count >= MAX_LOGIN_ATTEMPTS && now < lockout_until) {
+        auto &entry = it->second;
+        if (entry.fail_count >= MAX_LOGIN_ATTEMPTS && now < entry.lockout_until) {
           response->write(SimpleWeb::StatusCode::client_error_too_many_requests);
           return;
         }
@@ -1734,16 +1743,18 @@ namespace confighttp {
 
     auto fg = util::fail_guard([&]{
       std::lock_guard<std::mutex> lock(session_mutex);
-      auto &[fail_count, lockout_until] = login_attempts_by_ip[address_key];
-      fail_count++;
+      auto attempt_time = std::chrono::steady_clock::now();
+      auto &entry = login_attempts_by_ip[address_key];
+      entry.fail_count++;
+      entry.last_attempt = attempt_time;  // refresh activity so the prune window tracks real attempts
       // Set the lockout deadline ONLY on the transition to MAX
       // (the Nth failure). Setting it on every subsequent failure
       // extended the lockout from each new attempt — an attacker
       // could prevent the legitimate user from ever re-entering
       // simply by hammering the endpoint.
-      if (fail_count == MAX_LOGIN_ATTEMPTS) {
-        lockout_until = std::chrono::steady_clock::now() + LOGIN_LOCKOUT_DURATION;
-        BOOST_LOG(warning) << "Login locked out for 5 minutes for IP key " << address_key << " after " << fail_count << " failed attempts";
+      if (entry.fail_count == MAX_LOGIN_ATTEMPTS) {
+        entry.lockout_until = attempt_time + LOGIN_LOCKOUT_DURATION;
+        BOOST_LOG(warning) << "Login locked out for 5 minutes for IP key " << address_key << " after " << entry.fail_count << " failed attempts";
       }
       response->write(SimpleWeb::StatusCode::client_error_unauthorized);
     });

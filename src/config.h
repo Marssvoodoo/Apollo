@@ -176,10 +176,14 @@ namespace config {
     int wan_encryption_mode;
 
     // Adaptive streaming
-    bool adaptive_bitrate = true;
-    bool adaptive_fec = true;
-    bool frame_pacing = true;
-    bool thermal_protection = true;
+    // Safe-by-default: the adaptive suite is opt-in (see config.cpp defaults +
+    // CODE_REVIEW_FIXES_2026-06-03). Keep the in-class defaults OFF too so any
+    // stream_t constructed outside the one aggregate initializer can't silently
+    // re-enable per-frame pacing latency / resolution step-down.
+    bool adaptive_bitrate = false;
+    bool adaptive_fec = false;
+    bool frame_pacing = false;
+    bool thermal_protection = false;
     int min_bitrate = 2000;
     int max_bitrate = 40000;
     int min_fec_percentage = 10;

@@ -5,6 +5,12 @@ if(MSVC)
     list(APPEND SUNSHINE_COMPILE_OPTIONS /W3)
 else()
     list(APPEND SUNSHINE_COMPILE_OPTIONS -Wall -Wno-sign-compare)
+    # x86-64-v2 floor (SSE4.2/POPCNT, ~2009+ CPUs) so GCC can vectorize the FEC/
+    # Reed-Solomon and memcpy-heavy packetization path. Deliberately NOT
+    # -march=native — keep the shipped binary portable across streaming hosts.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        list(APPEND SUNSHINE_COMPILE_OPTIONS -march=x86-64-v2)
+    endif()
 endif()
 # Wall - enable all warnings
 # Werror - treat warnings as errors

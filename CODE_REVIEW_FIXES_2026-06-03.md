@@ -39,7 +39,8 @@ defaulted `true`. `frame_pacing` injects up to `max_pacing_buffer_ms` (4 ms) of
 `sleep_for` on the video **send** thread per frame, and the NVENC bitrate
 reconfigure path is intentionally hard-refused — so the suite added latency /
 silent resolution step-downs by default while the docs treated it as inert.
-*Fix:* defaulted the four adaptive toggles **off** (opt-in via the web UI).
+*Fix:* defaulted the four adaptive toggles **off** (opt-in via `sunshine.conf` —
+they are **not** exposed in the web UI yet, only `pin_required` is).
 `smart_reconnect` stays on (separate gated feature).
 
 ### MEDIUM
@@ -88,4 +89,39 @@ values out (matching the sibling handler).
 
 - Symbols confirmed (`config::stream.wifi_quality_signaling`,
   `VDISPLAY::topology_snapshot_slot()`, `proc::proc.terminate()` all resolve).
-- Incremental MSVC build of the `sunshine` target (see commit).
+- Incremental MinGW/UCRT64 build of the `sunshine` target links clean.
+
+---
+
+## Optimization pass (same day, second review)
+
+A second review with a performance / build / robustness lens (the hot path was
+already well-optimized by the prior 16 perf fixes — these are the remaining wins):
+
+1. **Strip the Release binary** — `cmake/targets/windows.cmake`. The build
+   shipped ~58 MB with full DWARF + a symbol table mapping the auth/crypto code;
+   added `-s` for `$<CONFIG:Release>`.
+2. **Safe-by-default struct defaults** — `src/config.h` + `src/bitrate_controller.h`.
+   The in-class `stream_t`/`config_t` defaults still declared the adaptive suite
+   `= true`; the 06-03 fix only changed the global aggregate initializer. Flipped
+   the in-class defaults to `false` so the type can't silently re-enable adaptive
+   from any other construction path.
+3. **Per-frame lock fast-path** — `src/bitrate_controller.h`. `get_pacing_buffer_us`,
+   `get_thermal_resolution`, `get_thermal_fps`, and `record_frame_interval` took
+   the `recursive_mutex` every frame even with the feature off. Added a pre-lock
+   read of the init-once `_cfg` flag (race-free: `_cfg` is written only in
+   `init()` before the video thread starts) so disabled features skip the lock.
+4. **`-march=x86-64-v2` floor** — `cmake/compile_definitions/common.cmake`
+   (x86-64 GCC/Clang only). Lets GCC vectorize the FEC/Reed-Solomon path with
+   SSE4.2/POPCNT. Not `-march=native` — binary stays portable.
+5. **Doc correction** — the adaptive suite is opt-in via `sunshine.conf`, not the
+   web UI (only `pin_required` is surfaced in the UI). Wording fixed above.
+6. **Adaptive min/max cross-validation** — `src/config.cpp`. Independent range
+   checks couldn't catch an inverted `min_bitrate > max_bitrate` (or FEC) pair;
+   normalize with `std::swap` after parsing.
+
+Not done (would need a build-verified, larger change): surfacing the ~20 adaptive
+knobs in the Vue web UI, and wiring the NVENC reconfigure queue so the thermal /
+adaptive-bitrate control surface actually reaches the encoder (both deferred).
+
+Verified: incremental MinGW build of `sunshine` links clean after this pass.

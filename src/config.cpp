@@ -1292,6 +1292,16 @@ namespace config {
     bool_f(vars, "wifi_quality_signaling", stream.wifi_quality_signaling);
     int_between_f(vars, "wifi_preemptive_drop_threshold", stream.wifi_preemptive_drop_threshold, {1, 4});
 
+    // Cross-field sanity: the independent range checks above can't catch an
+    // inverted pair (min > max), which would make the adaptive bitrate/FEC
+    // clamp ladder order-dependent. Normalize so min <= max holds.
+    if (stream.min_bitrate > stream.max_bitrate) {
+      std::swap(stream.min_bitrate, stream.max_bitrate);
+    }
+    if (stream.min_fec_percentage > stream.max_fec_percentage) {
+      std::swap(stream.min_fec_percentage, stream.max_fec_percentage);
+    }
+
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
     // This config option will only be used by the UI

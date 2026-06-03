@@ -41,8 +41,8 @@ namespace stream {
       // the feature emit log lines and stats packets without actually
       // adapting anything. User can opt back in after wiring lands.
       bool adaptive_bitrate = false;
-      bool adaptive_fec = true;
-      bool frame_pacing = true;
+      bool adaptive_fec = false;
+      bool frame_pacing = false;
       bool thermal_protection = false;
       int min_bitrate_kbps = 2000;
       int max_bitrate_kbps = 40000;
@@ -278,8 +278,15 @@ namespace stream {
     }
 
     int get_pacing_buffer_us() const {
+      // Fast path: _cfg is written once in init() before the video thread is
+      // created, so reading the (effectively const) feature flag without the
+      // lock is race-free and skips a per-frame recursive_mutex acquisition
+      // when the feature is off (the default).
+      if (!_cfg.frame_pacing) {
+        return 0;
+      }
       std::lock_guard<std::recursive_mutex> lock(_mtx);
-      if (!_cfg.frame_pacing || _jitter_count < 2) {
+      if (_jitter_count < 2) {
         return 0;
       }
 
@@ -298,6 +305,9 @@ namespace stream {
     }
 
     int get_thermal_resolution() const {
+      if (!_cfg.thermal_protection) {  // init-once flag; skip the per-frame lock when off
+        return 0;
+      }
       std::lock_guard<std::recursive_mutex> lock(_mtx);
       if (_thermal_state >= 2 && !_resolution_stepped_down) {
         return _cfg.thermal_step_down_resolution;
@@ -306,6 +316,9 @@ namespace stream {
     }
 
     int get_thermal_fps() const {
+      if (!_cfg.thermal_protection) {  // init-once flag; skip the per-frame lock when off
+        return 0;
+      }
       std::lock_guard<std::recursive_mutex> lock(_mtx);
       if (_thermal_state >= 2 && _resolution_stepped_down) {
         auto now = std::chrono::steady_clock::now();
@@ -318,6 +331,9 @@ namespace stream {
     }
 
     void record_frame_interval(std::chrono::microseconds interval) {
+      if (!_cfg.frame_pacing) {  // the jitter window only feeds pacing; skip the per-frame lock when off
+        return;
+      }
       std::lock_guard<std::recursive_mutex> lock(_mtx);
       _jitter_window[_jitter_idx] = interval;
       _jitter_idx = (_jitter_idx + 1) % JITTER_WINDOW_SIZE;

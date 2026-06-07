@@ -143,7 +143,8 @@ namespace safe {
     }
 
   private:
-    bool _continue {true};
+    // atomic: running() reads it without holding _lock (code review — was a plain bool race)
+    std::atomic_bool _continue {true};
     status_t _status {util::false_v<status_t>};
 
     std::condition_variable _cv;
@@ -340,7 +341,8 @@ namespace safe {
     }
 
   private:
-    bool _continue {true};
+    // atomic: running() reads it without holding _lock (code review — was a plain bool race)
+    std::atomic_bool _continue {true};
     std::uint32_t _max_elements;
 
     std::mutex _lock;
@@ -541,13 +543,14 @@ namespace safe {
     void cleanup() {
       std::lock_guard lg {mutex};
 
-      for (auto it = std::begin(id_to_post); it != std::end(id_to_post); ++it) {
-        auto &weak = it->second;
-
-        if (weak.expired()) {
-          id_to_post.erase(it);
-
-          return;
+      // Erase ALL expired entries (code review): the old code returned after the first,
+      // so when several posts for a session expired together the stragglers leaked and
+      // id_to_post grew across connect/disconnect cycles.
+      for (auto it = std::begin(id_to_post); it != std::end(id_to_post);) {
+        if (it->second.expired()) {
+          it = id_to_post.erase(it);
+        } else {
+          ++it;
         }
       }
     }

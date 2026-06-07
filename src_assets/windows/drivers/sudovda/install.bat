@@ -1,6 +1,20 @@
 @echo off
 pushd %~dp0
 
+rem --- Downgrade guard (code review) ------------------------------------------
+rem This (re)installs the BUNDLED SudoVDA driver (see DriverVer in SudoVDA.inf).
+rem On a machine that already has a NEWER SudoVDA driver, re-running this will
+rem DOWNGRADE it and can break the virtual display
+rem (STATUS_FAILED_DRIVER_ENTRY / 0xC0000365). Re-run with  install.bat /force
+rem only if you intentionally want to (re)install the bundled version.
+if /I not "%~1"=="/force" (
+  echo *** WARNING: this installs the BUNDLED SudoVDA driver and may DOWNGRADE an
+  echo *** already-installed newer version, which can break the virtual display.
+  echo *** If you really intend to, re-run:   install.bat /force
+  popd
+  exit /b 1
+)
+
 set "CERTUTIL=certutil"
 where certutil >nul 2>&1 || set "CERTUTIL=%SystemRoot%\System32\certutil.exe"
 

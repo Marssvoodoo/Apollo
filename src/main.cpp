@@ -3,8 +3,10 @@
  * @brief Definitions for the main entry point for Sunshine.
  */
 // standard includes
+#include <atomic>
 #include <codecvt>
 #include <csignal>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 
@@ -297,56 +299,40 @@ int main(int argc, char *argv[]) {
 
   // Create signal handler after logging has been initialized
   auto shutdown_event = mail::man->event<bool>(mail::shutdown);
-  on_signal(SIGINT, [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
-    BOOST_LOG(info) << "Interrupt handler called"sv;
+  // One shared handler for SIGINT and SIGTERM, guarded so the shutdown body runs
+  // exactly once even if both signals arrive. (Previously SIGINT and SIGTERM had
+  // byte-identical handlers; if both fired, proc::terminate() ran twice and the
+  // first force-shutdown task was leaked/overwritten.)
+  auto signal_handler = [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
+    static std::atomic<bool> shutting_down{false};
+    if (shutting_down.exchange(true)) {
+      return;
+    }
+    BOOST_LOG(info) << "Shutdown signal received"sv;
 
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
       logging::log_flush();
 #ifdef _WIN32
-      // Belt-and-suspenders: restore the user's display topology before the hard
-      // abort below. abort() does NOT run static destructors, so without this a
-      // force-shutdown (after a hung terminate()) would leave the user's physical
+      // Restore the user's display topology before the forced exit below. A forced
+      // exit (like abort) does NOT run static destructors, so without this a
+      // force-shutdown after a hung terminate() would leave the user's physical
       // monitors deactivated — a black screen needing Win+P / registry recovery.
       VDISPLAY::topology_snapshot_slot().reset();
 #endif
-      lifetime::debug_trap();
+      // Forced shutdown after a genuine hang: exit cleanly instead of
+      // lifetime::debug_trap() (DebugBreak()+abort()), which on an end-user machine
+      // surfaces as a 0x80000003 "crash" + WER report rather than a clean exit.
+      std::_Exit(1);
     };
 
     proc::proc.terminate();
-
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
-
     shutdown_event->raise(true);
     display_device_deinit_guard = nullptr;
-  });
-
-  on_signal(SIGTERM, [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
-    BOOST_LOG(info) << "Terminate handler called"sv;
-
-    auto task = []() {
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
-      logging::log_flush();
-#ifdef _WIN32
-      // Belt-and-suspenders: restore the user's display topology before the hard
-      // abort below. abort() does NOT run static destructors, so without this a
-      // force-shutdown (after a hung terminate()) would leave the user's physical
-      // monitors deactivated — a black screen needing Win+P / registry recovery.
-      VDISPLAY::topology_snapshot_slot().reset();
-#endif
-      lifetime::debug_trap();
-    };
-
-    // Match SIGINT: explicitly terminate the running process so the display
-    // topology snapshot is restored (.reset()) on the graceful path, instead
-    // of relying solely on a static destructor that the force-abort skips.
-    proc::proc.terminate();
-
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
-
-    shutdown_event->raise(true);
-    display_device_deinit_guard = nullptr;
-  });
+  };
+  on_signal(SIGINT, signal_handler);
+  on_signal(SIGTERM, signal_handler);
 
 #ifdef _WIN32
   // Terminate gracefully on Windows when console window is closed

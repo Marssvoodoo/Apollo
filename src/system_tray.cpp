@@ -198,8 +198,16 @@ namespace system_tray {
 
     // Wait for the shell to be initialized before registering the tray icon.
     // This ensures the tray icon works reliably after a logoff/logon cycle.
+    // Honor tray_thread_should_exit and poll faster: otherwise this worker stays
+    // stuck here for tens of seconds after a boot/service-start while the shell
+    // comes up, which blocks the main thread's join() in init_tray_threaded()/
+    // end_tray_threaded() — stalling graceful shutdown long enough to trip the
+    // 10s force-shutdown watchdog (the observed 0x80000003 force-abort "crash").
     while (GetShellWindow() == nullptr) {
-      Sleep(1000);
+      if (tray_thread_should_exit) {
+        return 1;
+      }
+      Sleep(250);
     }
   #endif
 

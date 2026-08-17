@@ -1,8 +1,8 @@
 # Apollo security and reliability remediation plan
 
-Status: source verified; commit and production deployment pending
-Version: 2
-Date: 2026-08-16
+Status: source committed and verified; local deployment rolled back and remains incomplete
+Version: 3
+Date: 2026-08-17
 
 ## Objective
 
@@ -22,13 +22,20 @@ shipping a tested, attributable binary with hardened runtime configuration.
 
 ## Current-state map and constraints
 
-- Fork HEAD before remediation: `13cd891`; installed executable has the same
-  SHA-256 as `build/sunshine.exe`.
-- Apollo runs as `LocalSystem` and listens on all interfaces.
+- Fork HEAD before remediation: `13cd891`. The verified remediation commit is
+  `81f7fb13f272c03b4021ef4c962647a137cfaf25` and is published only to
+  `Marssvoodoo/Apollo`.
+- The exact-commit Release executable is version `1.1.1.81f7fb1` with SHA-256
+  `94F269F007476F2F4F934665FFBAEDBEC4FDD800A621CDAAC73E0D9018064F5F`.
+- The local installation was rolled back after a failed elevated transaction.
+  It remains the old `0.0.0.dirty` executable with SHA-256
+  `22908D0F01D290928B5052D61EBC714A07C66160980C4F6AFA4DA43B5D75A5FF`,
+  and `ApolloService` is stopped.
 - The existing Windows Firewall rule allows all TCP and UDP ports, all profiles,
   and all remote addresses for `sunshine.exe`.
-- The combined credentials/pairing state file is readable by ordinary users and
-  contains a legacy v1 password hash.
+- The failed transaction's rollback preserved the intended private ACL on the
+  live config, credentials, state, certificate, key, and logs: only SYSTEM,
+  Administrators, and the Owner account have access.
 - The working tree contains unrelated user changes and untracked review files;
   they must remain untouched and excluded from commits.
 - The known Windows sandbox/toolchain ACL failure may prevent a fresh test build.
@@ -66,8 +73,10 @@ shipping a tested, attributable binary with hardened runtime configuration.
 
 5. Deployment hardening
    - LAN and WAN video encryption are mandatory in the live configuration.
-   - Firewall access is restricted to exact Apollo ports, Private profile, and
-     LocalSubnet.
+   - Firewall access is restricted to exact Apollo ports and LocalSubnet. The
+     Public and Private profiles are included because the active trusted
+     Ethernet connection is currently classified as Public; changing the
+     machine-wide network classification is outside this deployment.
    - Service restarts cleanly; HTTPS, pairing protection, listeners, logs,
      binary hash/version, state ACL, and a normal client connection are checked.
 
@@ -143,10 +152,42 @@ The production service, installed binary hash/version, firewall, live
 configuration, endpoint behavior, and TV client remain deployment acceptance
 items. They are not represented as complete by this source record.
 
+## Local deployment attempt and rollback
+
+The 2026-08-17 local deployment did not pass acceptance and is not represented
+as deployed:
+
+- Preflight proved there was no running Apollo process or active stream. The
+  service had been stopped by the system-tray quit action at 00:13 local time.
+- A non-elevated attempt was denied while creating the Program Files backup and
+  changed no installed files.
+- The UAC-elevated transaction created a complete protected rollback set at
+  `C:\Program Files\Apollo\backups\security-remediation-20260817-011545`,
+  including the prior executable, 139 web assets, seven config files, and an
+  exported firewall policy.
+- The elevated transaction then failed before runtime verification. Windows
+  Sudo is forced to a new window on this host, so the child error text was not
+  captured. The transaction restored the original executable, assets, config
+  contents, and two broad firewall rules. It intentionally did not weaken the
+  newly restricted config ACLs.
+- Final live evidence after rollback: service `Stopped`; installed executable
+  SHA-256 `22908D0F01D290928B5052D61EBC714A07C66160980C4F6AFA4DA43B5D75A5FF`;
+  version `0.0.0.dirty`; 139 installed web assets; `wan_encryption_mode = 0`;
+  obsolete `nv_preset`, `nv_multipass`, and `nv_rc` keys still present; firewall
+  TCP and UDP rules still allow any port, profile, and remote address.
+- No third deployment attempt was made after the two failed attempts. Local
+  endpoint, listener, encrypted TV-client, and installed-hash acceptance remain
+  blocked until an elevated run captures the failing child step.
+
 ## Progress log
 
 - 2026-08-16: source, installed binary, service, listeners, firewall,
   credentials, upstream divergence, tests, and dependency state reverified.
 - 2026-08-17: all planned source changes implemented. Frontend and native
   builds pass; the full 248-test suite has 0 failures; dependency audit is
-  clean. Commit/push and live deployment acceptance remain.
+  clean. Commit `81f7fb13f272c03b4021ef4c962647a137cfaf25` was pushed only
+  to `Marssvoodoo/Apollo`; the upstream repository was untouched.
+- 2026-08-17: exact-commit Release build and full suite reverified (241 passed,
+  7 environment/expected skips, 0 failed). The local deployment transaction
+  failed and rolled back; the protected rollback set and hardened config ACLs
+  were verified, while all remaining live deployment acceptance stays open.

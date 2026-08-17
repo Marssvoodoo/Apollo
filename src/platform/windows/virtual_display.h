@@ -20,7 +20,8 @@ namespace VDISPLAY {
 	 * at construction time. The destructor restores that exact configuration via
 	 * SetDisplayConfig with SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE so the
 	 * user's pre-stream layout (extend / clone / internal-only / multi-monitor positions)
-	 * is preserved across normal exits, exception unwinds, and signal-handler exits.
+	 * is preserved across orderly exits. A serialized recovery snapshot covers hard
+	 * process termination on the next Apollo start.
 	 *
 	 * If the initial QueryDisplayConfig call fails, the snapshot is marked invalid and the
 	 * destructor becomes a no-op rather than restoring garbage.
@@ -38,21 +39,29 @@ namespace VDISPLAY {
 		bool valid() const { return _valid; }
 
 	private:
+		bool persist_for_crash_recovery();
+		bool restore();
+
 		std::vector<DISPLAYCONFIG_PATH_INFO> _paths;
 		std::vector<DISPLAYCONFIG_MODE_INFO> _modes;
 		bool _valid = false;
+		bool _owns_recovery_file = false;
 	};
 
 	/**
 	 * @brief Accessor for the process-wide topology snapshot slot.
 	 *
-	 * Held in a function-local static std::unique_ptr so it survives every exit path that
-	 * runs static destructors (normal return from main, std::exit, std::terminate after
-	 * uncaught exception, signal handler that calls std::raise + return). The proc layer
-	 * resets it explicitly in normal teardown; the static destructor is the safety net for
-	 * abnormal exits.
+	 * Held in a function-local static std::unique_ptr for orderly teardown. The proc
+	 * layer resets it explicitly in normal teardown; exits that bypass destructors use
+	 * the separately persisted recovery snapshot.
 	 */
 	std::unique_ptr<display_topology_snapshot_t>& topology_snapshot_slot();
+
+	/**
+	 * @brief Restore a topology snapshot left by an ungraceful prior exit.
+	 * @return true when no recovery is needed or restoration succeeded.
+	 */
+	bool recover_persisted_topology();
 	enum class DRIVER_STATUS {
 		UNKNOWN              = 1,
 		OK                   = 0,

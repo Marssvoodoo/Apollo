@@ -32,14 +32,9 @@ namespace stream {
   class bitrate_controller_t {
   public:
     struct config_t {
-      // adaptive_bitrate / thermal_protection default OFF: the plumbing
-      // to actually apply the computed bitrate to the encoder is not
-      // wired (nvenc_base::update_bitrate exists and the virtual
-      // encode_session_t::update_bitrate exists, but no caller invokes
-      // them — see stream.cpp where the previous TODO comment lived).
-      // Until the encode-thread queue is in place, these defaults made
-      // the feature emit log lines and stats packets without actually
-      // adapting anything. User can opt back in after wiring lands.
+      // adaptive_bitrate / thermal_protection are forced OFF by config
+      // parsing until an encoder-thread reconfiguration queue exists. Keep
+      // these defaults false for direct/test construction as well.
       bool adaptive_bitrate = false;
       bool adaptive_fec = false;
       bool frame_pacing = false;
@@ -80,6 +75,7 @@ namespace stream {
       _wifi_quality = 4;
       _prev_wifi_quality = 4;
       _wifi_preemptive_active = false;
+      _last_wifi_report_time = {};
       _last_loss_time = std::chrono::steady_clock::now();
       _last_zero_loss_time = std::chrono::steady_clock::now();
       _thermal_last_change = std::chrono::steady_clock::now();
@@ -237,6 +233,12 @@ namespace stream {
       (void) link_speed_mbps;
 
       auto now = std::chrono::steady_clock::now();
+      if (_last_wifi_report_time != std::chrono::steady_clock::time_point {} &&
+          now - _last_wifi_report_time < std::chrono::milliseconds {500}) {
+        return;
+      }
+      _last_wifi_report_time = now;
+      quality = std::clamp(quality, 0, 4);
       _prev_wifi_quality.store(_wifi_quality.load());
       _wifi_quality.store(quality);
 
@@ -405,6 +407,7 @@ namespace stream {
     std::atomic<int> _wifi_quality{4};
     std::atomic<int> _prev_wifi_quality{4};
     std::chrono::steady_clock::time_point _wifi_quality_time;
+    std::chrono::steady_clock::time_point _last_wifi_report_time;
     std::atomic<bool> _wifi_preemptive_active{false};
 
     float compute_loss_rate() const {

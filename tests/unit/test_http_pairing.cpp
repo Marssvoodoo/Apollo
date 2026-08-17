@@ -6,6 +6,7 @@
 #include "../tests_common.h"
 
 #include <src/nvhttp.h>
+#include <src/httpcommon.h>
 
 using namespace nvhttp;
 
@@ -28,6 +29,20 @@ struct pairing_output {
   bool phase_3_success;
   bool phase_4_success;
 };
+
+std::shared_ptr<pair_session_t> make_pair_session(
+  std::string unique_id = {},
+  std::string cert = {},
+  std::string name = {},
+  std::string salt = {}
+) {
+  auto session = std::make_shared<pair_session_t>();
+  session->client.uniqueID = std::move(unique_id);
+  session->client.cert = std::move(cert);
+  session->client.name = std::move(name);
+  session->async_insert_pin.salt = std::move(salt);
+  return session;
+}
 
 const std::string PRIVATE_KEY = R"(-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDLePNlWN06FLlM
@@ -76,7 +91,28 @@ X4wnh1bwdiidqpcgyuKossLOPxbS786WmsesaAWPnpoY6M8aija+ALwNNuWWmyMg
 9SVDV76xJzM36Uq7Kg3QJYTlY04WmPIdJHkCtXWf9g==
 -----END CERTIFICATE-----)";
 
-struct PairingTest: testing::TestWithParam<std::tuple<pairing_input, pairing_output>> {};
+struct PairingTest: testing::TestWithParam<std::tuple<pairing_input, pairing_output>> {
+  void SetUp() override {
+    original_state_file = config::nvhttp.file_state;
+    original_unique_id = http::unique_id;
+    test_state_file = std::filesystem::path(SUNSHINE_TEST_BIN_DIR) / "pairing_state.json";
+    config::nvhttp.file_state = test_state_file.string();
+    http::unique_id = "8CBDFD39-33BD-3229-8A9F-7731FF06E2E7";
+    std::filesystem::remove(test_state_file);
+    erase_all_clients();
+  }
+
+  void TearDown() override {
+    erase_all_clients();
+    std::filesystem::remove(test_state_file);
+    config::nvhttp.file_state = original_state_file;
+    http::unique_id = original_unique_id;
+  }
+
+  std::string original_state_file;
+  std::string original_unique_id;
+  std::filesystem::path test_state_file;
+};
 
 TEST_P(PairingTest, Run) {
   auto [input, expected] = GetParam();
@@ -108,23 +144,15 @@ TEST_P(PairingTest, Run) {
   input.session->serverchallenge = input.override_server_challenge;
 
   // phase 4
-  auto input_client_cert = input.session->client.cert;  // Will be moved
-  auto add_cert = std::make_shared<safe::queue_t<crypto::x509_t>>(30);
-  clientpairingsecret(*input.session, add_cert, tree, input.client_pairing_secret);
+  const auto client_count_before = get_all_clients().size();
+  clientpairingsecret(*input.session, tree, input.client_pairing_secret);
   ASSERT_EQ(tree.get<int>("root.paired") == 1, expected.phase_4_success);
 
-  // Check that we actually added the input client certificate to `add_cert`
+  // Check that successful pairing actually registered the client.
   if (expected.phase_4_success) {
-    ASSERT_EQ(add_cert->peek(), true);
-    auto cert = add_cert->pop();
-    char added_subject_name[256];
-    X509_NAME_oneline(X509_get_subject_name(cert.get()), added_subject_name, sizeof(added_subject_name));
-
-    auto input_cert = crypto::x509(input_client_cert);
-    char original_suject_name[256];
-    X509_NAME_oneline(X509_get_subject_name(input_cert.get()), original_suject_name, sizeof(original_suject_name));
-
-    ASSERT_EQ(std::string(added_subject_name), std::string(original_suject_name));
+    const auto clients = get_all_clients();
+    ASSERT_EQ(clients.size(), client_count_before + 1);
+    EXPECT_EQ(clients.back().at("name"), "test");
   }
 }
 
@@ -134,16 +162,7 @@ INSTANTIATE_TEST_SUITE_P(
   testing::Values(
     std::make_tuple(
       pairing_input {
-        .session = std::make_shared<pair_session_t>(
-          pair_session_t {
-            .client = {
-              .uniqueID = "1234",
-              .cert = PUBLIC_CERT,
-              .name = "test"
-            },
-            .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}
-          }
-        ),
+        .session = make_pair_session("1234", PUBLIC_CERT, "test", "ff5dc6eda99339a8a0793e216c4257c4"),
         .override_server_challenge = util::from_hex_vec("AAAAAAAAAAAAAAAA", true),
         .pin = "5338",
         /* AES("CLIENT CHALLENGE") */
@@ -160,7 +179,7 @@ INSTANTIATE_TEST_SUITE_P(
     ),
     // Testing that when passing some empty values we aren't triggering any exception
     std::make_tuple(pairing_input {
-                      .session = std::make_shared<pair_session_t>(pair_session_t {.client = {}, .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}}),
+                      .session = make_pair_session({}, {}, {}, "ff5dc6eda99339a8a0793e216c4257c4"),
                       .override_server_challenge = {},
                       .pin = {},
                       .client_challenge = {},
@@ -171,7 +190,7 @@ INSTANTIATE_TEST_SUITE_P(
                     pairing_output {true, true, true, false}),
     // Testing that when passing some empty values we aren't triggering any exception
     std::make_tuple(pairing_input {
-                      .session = std::make_shared<pair_session_t>(pair_session_t {.client = {.cert = PUBLIC_CERT}, .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}}),
+                      .session = make_pair_session({}, PUBLIC_CERT, {}, "ff5dc6eda99339a8a0793e216c4257c4"),
                       .override_server_challenge = {},
                       .pin = {},
                       .client_challenge = {},
@@ -192,16 +211,7 @@ INSTANTIATE_TEST_SUITE_P(
      */
     std::make_tuple(
       pairing_input {
-        .session = std::make_shared<pair_session_t>(
-          pair_session_t {
-            .client = {
-              .uniqueID = "1234",
-              .cert = PUBLIC_CERT,
-              .name = "test"
-            },
-            .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}
-          }
-        ),
+        .session = make_pair_session("1234", PUBLIC_CERT, "test", "ff5dc6eda99339a8a0793e216c4257c4"),
         .override_server_challenge = util::from_hex_vec("AAAAAAAAAAAAAAAA", true),
         .pin = "0000",
         .client_challenge = util::from_hex_vec("741CD3D6890C16DA39D53BCA0893AAF0", true),
@@ -215,7 +225,7 @@ INSTANTIATE_TEST_SUITE_P(
     /**
      * Wrong client challenge
      */
-    std::make_tuple(pairing_input {.session = std::make_shared<pair_session_t>(pair_session_t {.client = {.uniqueID = "1234", .cert = PUBLIC_CERT, .name = "test"}, .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}}), .override_server_challenge = util::from_hex_vec("AAAAAAAAAAAAAAAA", true), .pin = "5338", .client_challenge = util::from_hex_vec("741CD3D6890C16DA39D53BCA0893AAF0", true), .server_challenge_resp = util::from_hex_vec("WRONG", true),
+    std::make_tuple(pairing_input {.session = make_pair_session("1234", PUBLIC_CERT, "test", "ff5dc6eda99339a8a0793e216c4257c4"), .override_server_challenge = util::from_hex_vec("AAAAAAAAAAAAAAAA", true), .pin = "5338", .client_challenge = util::from_hex_vec("741CD3D6890C16DA39D53BCA0893AAF0", true), .server_challenge_resp = util::from_hex_vec("WRONG", true),
                                    .client_pairing_secret = util::from_hex_vec("000102030405060708090A0B0C0D0EFF"  // secret
                                                                                "9BB74D8DE2FF006C3F47FC45EFDAA97D433783AFAB3ACD85CA7ED2330BB2A7BD18A5B044AF8CAC177116FAE8A6E8E44653A8944A0F8EA138B2E013756D847D2C4FC52F736E2E7E9B4154712B18F8307B2A161E010F0587744163E42ECA9EA548FC435756EDCF1FEB94037631ABB72B29DDAC0EA5E61F2DBFCC3B20AA021473CC85AC98D88052CA6618ED1701EFBF142C18D5E779A3155B84DF65057D4823EC194E6DF14006793E8D7A3DCCE20A911636C4E01ECA8B54B9DE9F256F15DE9A980EA024B30D77579140D45EC220C738164BDEEEBF7364AE94A5FF9B784B40F2E640CE8603017DEEAC7B2AD77B807C643B7B349C110FE15F94C7B3D37FF15FDFBE26",
                                                                                true)},
@@ -223,7 +233,7 @@ INSTANTIATE_TEST_SUITE_P(
     /**
      * Wrong signature
      */
-    std::make_tuple(pairing_input {.session = std::make_shared<pair_session_t>(pair_session_t {.client = {.uniqueID = "1234", .cert = PUBLIC_CERT, .name = "test"}, .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}}), .override_server_challenge = util::from_hex_vec("AAAAAAAAAAAAAAAA", true), .pin = "5338", .client_challenge = util::from_hex_vec("741CD3D6890C16DA39D53BCA0893AAF0", true), .server_challenge_resp = util::from_hex_vec("920BABAE9F7599AA1CA8EC87FB3454C91872A7D8D5127DDC176C2FDAE635CF7A", true),
+    std::make_tuple(pairing_input {.session = make_pair_session("1234", PUBLIC_CERT, "test", "ff5dc6eda99339a8a0793e216c4257c4"), .override_server_challenge = util::from_hex_vec("AAAAAAAAAAAAAAAA", true), .pin = "5338", .client_challenge = util::from_hex_vec("741CD3D6890C16DA39D53BCA0893AAF0", true), .server_challenge_resp = util::from_hex_vec("920BABAE9F7599AA1CA8EC87FB3454C91872A7D8D5127DDC176C2FDAE635CF7A", true),
                                    .client_pairing_secret = util::from_hex_vec("000102030405060708090A0B0C0D0EFF"  // secret
                                                                                "NOSIGNATURE",  // Wrong signature
                                                                                true)},
@@ -235,7 +245,7 @@ INSTANTIATE_TEST_SUITE_P(
     /**
      * null values (phase 4, phase 2 and 3 have no reason to fail since we are running them in order)
      */
-    std::make_tuple(pairing_input {.session = std::make_shared<pair_session_t>(pair_session_t {.async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}})}, pairing_output {true, true, true, false})
+    std::make_tuple(pairing_input {.session = make_pair_session({}, {}, {}, "ff5dc6eda99339a8a0793e216c4257c4")}, pairing_output {true, true, true, false})
   )
 );
 
@@ -252,8 +262,7 @@ TEST(PairingTest, OutOfOrderCalls) {
   serverchallengeresp(sess, tree, "test");
   ASSERT_FALSE(tree.get<int>("root.paired") == 1);
 
-  auto add_cert = std::make_shared<safe::queue_t<crypto::x509_t>>(30);
-  clientpairingsecret(sess, add_cert, tree, "test");
+  clientpairingsecret(sess, tree, "test");
   ASSERT_FALSE(tree.get<int>("root.paired") == 1);
 
   // This should work, it's the first time we call it

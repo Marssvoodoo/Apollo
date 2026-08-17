@@ -47,6 +47,14 @@ else()
                 RESULT_VARIABLE GIT_DESCRIBE_ERROR_CODE
                 OUTPUT_STRIP_TRAILING_WHITESPACE
         )
+        if(NOT DEFINED GITHUB_COMMIT OR GITHUB_COMMIT STREQUAL "")
+            execute_process(
+                    COMMAND ${GIT_EXECUTABLE} rev-parse HEAD
+                    OUTPUT_VARIABLE GITHUB_COMMIT
+                    RESULT_VARIABLE GIT_COMMIT_ERROR_CODE
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+        endif()
         # Check if Dirty
         execute_process(
                 COMMAND ${GIT_EXECUTABLE} diff -b --quiet --exit-code
@@ -55,10 +63,8 @@ else()
         )
         if(NOT GIT_DESCRIBE_ERROR_CODE)
             MESSAGE("Sunshine Branch: ${GIT_DESCRIBE_BRANCH}")
-            if(NOT GIT_DESCRIBE_BRANCH STREQUAL "master")
-                set(PROJECT_VERSION ${PROJECT_VERSION}.${GIT_DESCRIBE_VERSION})
-                MESSAGE("Sunshine Version: ${GIT_DESCRIBE_VERSION}")
-            endif()
+            set(PROJECT_VERSION ${PROJECT_VERSION}.${GIT_DESCRIBE_VERSION})
+            MESSAGE("Sunshine Version: ${GIT_DESCRIBE_VERSION}")
             if(GIT_IS_DIRTY)
                 set(PROJECT_VERSION ${PROJECT_VERSION}.dirty)
                 MESSAGE("Git tree is dirty!")

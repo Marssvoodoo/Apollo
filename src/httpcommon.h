@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <mutex>
+
 // lib includes
 #include <curl/curl.h>
 
@@ -13,6 +15,8 @@
 #include "uuid.h"
 
 namespace http {
+
+  constexpr int CURRENT_HASH_VERSION = 3;
 
   int init();
   int create_creds(const std::string &pkey, const std::string &cert);
@@ -24,6 +28,7 @@ namespace http {
   );
 
   int reload_user_creds(const std::string &file);
+  std::recursive_mutex &state_file_mutex();
   std::string hash_password(const std::string &password, const std::string &salt, int hash_version);
   bool download_file(const std::string &url, const std::string &file, long ssl_version = CURL_SSLVERSION_TLSv1_2);
   std::string url_escape(const std::string &url);

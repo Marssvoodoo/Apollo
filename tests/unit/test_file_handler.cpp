@@ -94,3 +94,11 @@ TEST(FileHandlerTests, ReadMissingFileTest) {
   // read missing file
   EXPECT_EQ(file_handler::read_file("non-existing-file.txt"), "");
 }
+
+TEST(FileHandlerTests, WritePrivateFileAtomically) {
+  const std::string file_name = "write_private_file_test.bin";
+  const std::string contents {"private\0state", 13};
+  ASSERT_EQ(file_handler::write_private_file(file_name.c_str(), contents), 0);
+  EXPECT_EQ(file_handler::read_file(file_name.c_str()), contents);
+  std::filesystem::remove(file_name);
+}

@@ -1,5 +1,9 @@
 #include <windows.h>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <setupapi.h>
 #include <initguid.h>
@@ -13,11 +17,67 @@
 #include <dxgi1_6.h>
 
 #include "src/logging.h"
+#include "src/file_handler.h"
+#include "src/platform/common.h"
 #include "virtual_display.h"
 
 using namespace SUDOVDA;
 
 namespace VDISPLAY {
+namespace {
+	constexpr std::uint32_t TOPOLOGY_RECOVERY_MAGIC = 0x41505452;  // "APTR"
+	constexpr std::uint32_t TOPOLOGY_RECOVERY_VERSION = 1;
+	constexpr std::uint32_t MAX_RECOVERY_PATHS = 64;
+	constexpr std::uint32_t MAX_RECOVERY_MODES = 256;
+
+	struct topology_recovery_header_t {
+		std::uint32_t magic;
+		std::uint32_t version;
+		std::uint32_t path_count;
+		std::uint32_t mode_count;
+	};
+
+	std::filesystem::path topology_recovery_path() {
+		return platf::appdata() / "display_topology_recovery.bin";
+	}
+
+	bool restore_topology(
+		std::vector<DISPLAYCONFIG_PATH_INFO>& paths,
+		std::vector<DISPLAYCONFIG_MODE_INFO>& modes,
+		const char *source
+	) {
+		LONG status = SetDisplayConfig(
+			static_cast<UINT32>(paths.size()),
+			paths.data(),
+			static_cast<UINT32>(modes.size()),
+			modes.data(),
+			SDC_APPLY
+			| SDC_USE_SUPPLIED_DISPLAY_CONFIG
+			| SDC_ALLOW_PATH_ORDER_CHANGES
+			| SDC_SAVE_TO_DATABASE
+		);
+
+		if (status == ERROR_SUCCESS) {
+			BOOST_LOG(info) << "[SUDOVDA] display_topology_snapshot: " << source << " topology restored.";
+			return true;
+		}
+
+		BOOST_LOG(warning) << "[SUDOVDA] display_topology_snapshot: " << source
+		                   << " SetDisplayConfig restore failed (status=" << status << ").";
+		return false;
+	}
+
+	bool discard_invalid_recovery_file(const std::filesystem::path& recovery_path) {
+		std::error_code ec;
+		std::filesystem::remove(recovery_path, ec);
+		if (ec) {
+			BOOST_LOG(error) << "[SUDOVDA] display_topology_snapshot: could not remove invalid recovery snapshot: " << ec.message();
+			return false;
+		}
+		return true;
+	}
+}  // namespace
+
 // {dff7fd29-5b75-41d1-9731-b32a17a17104}
 // static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };
 
@@ -66,40 +126,136 @@ display_topology_snapshot_t::display_topology_snapshot_t() {
 	_modes.resize(modeCount);
 
 	_valid = true;
+	_owns_recovery_file = persist_for_crash_recovery();
 	BOOST_LOG(info) << "[SUDOVDA] display_topology_snapshot: captured " << pathCount << " path(s) and " << modeCount << " mode(s).";
 }
 
 display_topology_snapshot_t::~display_topology_snapshot_t() {
+	restore();
+}
+
+bool display_topology_snapshot_t::persist_for_crash_recovery() {
+	if (_paths.empty() || _paths.size() > MAX_RECOVERY_PATHS ||
+	    _modes.empty() || _modes.size() > MAX_RECOVERY_MODES) {
+		BOOST_LOG(error) << "[SUDOVDA] display_topology_snapshot: refusing to persist invalid snapshot dimensions.";
+		return false;
+	}
+
+	const auto recovery_path = topology_recovery_path();
+	if (std::filesystem::exists(recovery_path)) {
+		// A prior snapshot that could not yet be restored is more valuable than
+		// the machine's potentially already-damaged current layout. Never
+		// overwrite it with a new session snapshot.
+		BOOST_LOG(warning) << "[SUDOVDA] display_topology_snapshot: unresolved recovery snapshot already exists; preserving it.";
+		return false;
+	}
+
+	topology_recovery_header_t header {
+		TOPOLOGY_RECOVERY_MAGIC,
+		TOPOLOGY_RECOVERY_VERSION,
+		static_cast<std::uint32_t>(_paths.size()),
+		static_cast<std::uint32_t>(_modes.size()),
+	};
+
+	std::string data;
+	data.resize(
+		sizeof(header)
+		+ _paths.size() * sizeof(DISPLAYCONFIG_PATH_INFO)
+		+ _modes.size() * sizeof(DISPLAYCONFIG_MODE_INFO));
+
+	auto *cursor = data.data();
+	std::memcpy(cursor, &header, sizeof(header));
+	cursor += sizeof(header);
+	std::memcpy(cursor, _paths.data(), _paths.size() * sizeof(DISPLAYCONFIG_PATH_INFO));
+	cursor += _paths.size() * sizeof(DISPLAYCONFIG_PATH_INFO);
+	std::memcpy(cursor, _modes.data(), _modes.size() * sizeof(DISPLAYCONFIG_MODE_INFO));
+
+	const auto recovery_path_string = recovery_path.string();
+	if (file_handler::write_private_file(recovery_path_string.c_str(), data)) {
+		BOOST_LOG(error) << "[SUDOVDA] display_topology_snapshot: failed to persist crash-recovery snapshot.";
+		return false;
+	}
+
+	return true;
+}
+
+bool display_topology_snapshot_t::restore() {
 	if (!_valid) {
-		// Capture failed — refuse to call SetDisplayConfig with empty/garbage arrays.
-		return;
+		return false;
 	}
 
-	LONG status = SetDisplayConfig(
-		static_cast<UINT32>(_paths.size()),
-		_paths.data(),
-		static_cast<UINT32>(_modes.size()),
-		_modes.data(),
-		SDC_APPLY
-		| SDC_USE_SUPPLIED_DISPLAY_CONFIG
-		| SDC_ALLOW_PATH_ORDER_CHANGES
-		| SDC_SAVE_TO_DATABASE
-	);
-
-	if (status == ERROR_SUCCESS) {
-		BOOST_LOG(info) << "[SUDOVDA] display_topology_snapshot: pre-stream topology restored.";
-	} else {
-		BOOST_LOG(warning) << "[SUDOVDA] display_topology_snapshot: SetDisplayConfig restore failed (status=" << status << ").";
+	if (!restore_topology(_paths, _modes, "pre-stream")) {
+		return false;
 	}
+
+	_valid = false;
+	if (_owns_recovery_file) {
+		std::error_code ec;
+		std::filesystem::remove(topology_recovery_path(), ec);
+		if (ec) {
+			BOOST_LOG(warning) << "[SUDOVDA] display_topology_snapshot: restored topology but could not remove recovery file: " << ec.message();
+		}
+		_owns_recovery_file = false;
+	}
+	return true;
+}
+
+bool recover_persisted_topology() {
+	const auto recovery_path = topology_recovery_path();
+	if (!std::filesystem::exists(recovery_path)) {
+		return true;
+	}
+
+	const auto recovery_path_string = recovery_path.string();
+	const auto data = file_handler::read_file(recovery_path_string.c_str());
+	if (data.size() < sizeof(topology_recovery_header_t)) {
+		BOOST_LOG(error) << "[SUDOVDA] display_topology_snapshot: invalid recovery snapshot header; removing corrupt file.";
+		return discard_invalid_recovery_file(recovery_path);
+	}
+
+	topology_recovery_header_t header {};
+	std::memcpy(&header, data.data(), sizeof(header));
+	if (header.magic != TOPOLOGY_RECOVERY_MAGIC ||
+	    header.version != TOPOLOGY_RECOVERY_VERSION ||
+	    header.path_count == 0 || header.path_count > MAX_RECOVERY_PATHS ||
+	    header.mode_count == 0 || header.mode_count > MAX_RECOVERY_MODES) {
+		BOOST_LOG(error) << "[SUDOVDA] display_topology_snapshot: rejected invalid recovery snapshot metadata; removing corrupt file.";
+		return discard_invalid_recovery_file(recovery_path);
+	}
+
+	const std::size_t expected_size =
+		sizeof(header)
+		+ static_cast<std::size_t>(header.path_count) * sizeof(DISPLAYCONFIG_PATH_INFO)
+		+ static_cast<std::size_t>(header.mode_count) * sizeof(DISPLAYCONFIG_MODE_INFO);
+	if (data.size() != expected_size) {
+		BOOST_LOG(error) << "[SUDOVDA] display_topology_snapshot: rejected truncated recovery snapshot; removing corrupt file.";
+		return discard_invalid_recovery_file(recovery_path);
+	}
+
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(header.path_count);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(header.mode_count);
+	const auto *cursor = data.data() + sizeof(header);
+	std::memcpy(paths.data(), cursor, paths.size() * sizeof(DISPLAYCONFIG_PATH_INFO));
+	cursor += paths.size() * sizeof(DISPLAYCONFIG_PATH_INFO);
+	std::memcpy(modes.data(), cursor, modes.size() * sizeof(DISPLAYCONFIG_MODE_INFO));
+
+	if (!restore_topology(paths, modes, "persisted crash-recovery")) {
+		// Preserve the snapshot for the next service start. Adapter initialization
+		// can be transient during early boot and a later retry may succeed.
+		return false;
+	}
+
+	std::error_code ec;
+	std::filesystem::remove(recovery_path, ec);
+	if (ec) {
+		BOOST_LOG(warning) << "[SUDOVDA] display_topology_snapshot: recovered topology but could not remove recovery file: " << ec.message();
+	}
+	return true;
 }
 
 std::unique_ptr<display_topology_snapshot_t>& topology_snapshot_slot() {
-	// Function-local static: lifetime extends to process teardown so its destructor
-	// runs even on abnormal exits that go through std::exit / std::terminate /
-	// signal handlers that return into the runtime. proc::execute() resets() this
-	// before each session and proc::terminate() / signal handlers reset() it after
-	// removing the virtual display, which is the normal restore path. The static
-	// destructor is the safety net for crashes / unexpected paths.
+	// Function-local static covers orderly teardown paths. A persisted snapshot
+	// covers hard process termination and faults where C++ destructors cannot run.
 	static std::unique_ptr<display_topology_snapshot_t> slot;
 	return slot;
 }

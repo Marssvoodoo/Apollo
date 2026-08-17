@@ -350,7 +350,7 @@ namespace stream {
     control_server_t control_server;
   };
 
-  struct session_t {
+  struct session_t: std::enable_shared_from_this<session_t> {
     config_t config;
 
     safe::mail_t mail;
@@ -433,6 +433,19 @@ namespace stream {
     // Smart reconnect
     std::chrono::steady_clock::time_point suspend_time;
   };
+
+  bool has_suspension_capacity(std::size_t suspended_sessions, int max_suspended_sessions) {
+    return max_suspended_sessions > 0 &&
+           suspended_sessions < static_cast<std::size_t>(max_suspended_sessions);
+  }
+
+  bool reconnect_deadline_expired(
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::time_point suspended_at,
+    int timeout_seconds
+  ) {
+    return now - suspended_at > std::chrono::seconds(timeout_seconds);
+  }
 
   /**
    * First part of cipher must be struct of type control_encrypted_t
@@ -689,17 +702,36 @@ namespace stream {
           BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
           // Feature 6: Smart reconnect - suspend instead of stopping immediately
           if (config::stream.smart_reconnect && session->state == session::state_e::RUNNING) {
-            BOOST_LOG(info) << "Smart reconnect: suspending session for up to "sv
-                           << config::stream.smart_reconnect_timeout_s << " seconds"sv;
-            session->state.store(session::state_e::SUSPENDED, std::memory_order_release);
-            session->suspend_time = std::chrono::steady_clock::now();
-
-            // Remove peer mapping but keep the session in the list
+            std::size_t suspended_sessions = 0;
             {
-              auto ptslg = _peer_to_session.lock();
-              _peer_to_session->erase(session->control.peer);
+              auto sessions_lock = _sessions.lock();
+              suspended_sessions = std::count_if(
+                _sessions->begin(),
+                _sessions->end(),
+                [session](const session_t *candidate) {
+                  return candidate != session &&
+                         candidate->state.load(std::memory_order_acquire) == session::state_e::SUSPENDED;
+                });
             }
-            session->control.peer = nullptr;
+
+            if (!has_suspension_capacity(suspended_sessions, config::stream.max_suspended_sessions)) {
+              BOOST_LOG(warning) << "Smart reconnect capacity reached ("sv
+                                 << config::stream.max_suspended_sessions
+                                 << "); stopping disconnected session"sv;
+              session::stop(*session);
+            } else {
+              BOOST_LOG(info) << "Smart reconnect: suspending session for up to "sv
+                              << config::stream.smart_reconnect_timeout_s << " seconds"sv;
+              session->state.store(session::state_e::SUSPENDED, std::memory_order_release);
+              session->suspend_time = std::chrono::steady_clock::now();
+
+              // Remove peer mapping but keep the session in the list.
+              {
+                auto ptslg = _peer_to_session.lock();
+                _peer_to_session->erase(session->control.peer);
+              }
+              session->control.peer = nullptr;
+            }
           } else if (session->state == session::state_e::RUNNING) {
             session::stop(*session);
           }
@@ -1118,9 +1150,15 @@ namespace stream {
         << "last good frame [" << lastGoodFrame << ']' << std::endl
         << "---end stats---";
 
-      // Feed loss stats to adaptive bitrate controller
-      // stats[2] is total packets sent in this interval (undocumented but present in Moonlight protocol)
-      auto packets_sent = stats[2] > 0 ? stats[2] : 1;
+      // stats[2] is total packets sent in this interval. A zero/negative
+      // denominator (or a loss count outside the interval) is malformed; do
+      // not turn it into a synthetic one-packet sample that can manipulate the
+      // adaptive controller.
+      const auto packets_sent = stats[2];
+      if (packets_sent <= 0 || count < 0 || count > packets_sent) {
+        BOOST_LOG(warning) << "IDX_LOSS_STATS: invalid sent/lost counts"sv;
+        return;
+      }
       session->bitrate_ctrl.on_loss_stats(packets_sent, count);
     });
 
@@ -1268,7 +1306,7 @@ namespace stream {
         BOOST_LOG(warning) << "IDX_WIFI_QUALITY: payload too small"sv;
         return;
       }
-      int quality = (int)(uint8_t)payload.data()[0];
+      int quality = std::clamp((int)(uint8_t)payload.data()[0], 0, 4);
       int rssi = (int)(int8_t)payload.data()[1];
       uint16_t link_speed_raw;
       std::memcpy(&link_speed_raw, payload.data() + 2, sizeof(link_speed_raw));
@@ -1376,7 +1414,8 @@ namespace stream {
         return;
       }
 
-      auto type = *(std::uint16_t *) plaintext.data();
+      std::uint16_t type = 0;
+      std::memcpy(&type, plaintext.data(), sizeof(type));
       std::string_view next_payload {(char *) plaintext.data() + 4, plaintext.size() - 4};
 
       if (type == packetTypes[IDX_ENCRYPTED]) {
@@ -1433,22 +1472,25 @@ namespace stream {
 
           auto session = *pos;
 
-          if (now > session->pingTimeout) {
-            auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
-            BOOST_LOG(info) << address << ": Ping Timeout"sv;
-            session::stop(*session);
-          }
-
           // Feature 6: Smart reconnect - handle suspended sessions
           if (session->state.load(std::memory_order_acquire) == session::state_e::SUSPENDED) {
-            auto elapsed = now - session->suspend_time;
-            if (elapsed > std::chrono::seconds(config::stream.smart_reconnect_timeout_s)) {
+            if (reconnect_deadline_expired(now, session->suspend_time, config::stream.smart_reconnect_timeout_s)) {
               BOOST_LOG(info) << "Suspended session timed out, cleaning up"sv;
               session->state.store(session::state_e::STOPPING, std::memory_order_release);
             } else {
               ++pos;
               continue;  // Skip normal processing for suspended sessions
             }
+          }
+
+          // A suspended session has its own reconnect deadline. Applying the
+          // shorter generic ping timeout first silently reduced the advertised
+          // reconnect window from 30 seconds to 10 seconds.
+          if (session->state.load(std::memory_order_acquire) != session::state_e::STOPPING &&
+              now > session->pingTimeout) {
+            auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
+            BOOST_LOG(info) << address << ": Ping Timeout"sv;
+            session::stop(*session);
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
@@ -1672,7 +1714,10 @@ namespace stream {
 
       frame_network_latency_logger.first_point_now();
 
-      auto session = (session_t *) packet->channel_data;
+      auto session = std::static_pointer_cast<session_t>(packet->channel_data);
+      if (!session || session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
+        continue;
+      }
 
       // Feature 3: Frame pacing - record inter-frame intervals for jitter calculation
       {
@@ -1687,25 +1732,6 @@ namespace stream {
         auto pacing_us = session->bitrate_ctrl.get_pacing_buffer_us();
         if (pacing_us > 0) {
           std::this_thread::sleep_for(std::chrono::microseconds(pacing_us));
-        }
-      }
-
-      // Feature 4: Check thermal state and log if stepped down
-      {
-        auto thermal_res = session->bitrate_ctrl.get_thermal_resolution();
-        if (thermal_res > 0) {
-          BOOST_LOG(warning) << "Thermal protection: suggesting resolution step-down to "sv << thermal_res << "p"sv;
-          // Ack the suggestion so the FPS step-down path (which is gated
-          // on _resolution_stepped_down) can fire once 10s have elapsed.
-          // Strictly this should only happen after the encoder has
-          // actually reconfigured — see Critical #7 in MASTER_REVIEW.md.
-          // Until adaptive bitrate is wired through, an ack-on-log keeps
-          // the prior behavior of the FPS branch.
-          session->bitrate_ctrl.ack_resolution_step_down();
-        }
-        auto thermal_fps = session->bitrate_ctrl.get_thermal_fps();
-        if (thermal_fps > 0) {
-          BOOST_LOG(warning) << "Thermal protection: suggesting FPS step-down to "sv << thermal_fps;
         }
       }
 
@@ -2033,7 +2059,10 @@ namespace stream {
       }
 
       TUPLE_2D_REF(channel_data, packet_data, *packet);
-      auto session = (session_t *) channel_data;
+      auto session = std::static_pointer_cast<session_t>(channel_data);
+      if (!session || session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
+        continue;
+      }
 
       auto sequenceNumber = session->audio.sequenceNumber;
       auto timestamp = session->audio.timestamp;
@@ -2262,7 +2291,7 @@ namespace stream {
     return -1;
   }
 
-  void videoThread(session_t *session) {
+  void videoThread(std::shared_ptr<session_t> session) {
     auto fg = util::fail_guard([&]() {
       session::stop(*session);
     });
@@ -2270,7 +2299,7 @@ namespace stream {
     while_starting_do_nothing(session->state);
 
     auto ref = broadcast.ref();
-    auto error = recv_ping(session, ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
+    auto error = recv_ping(session.get(), ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
     if (error < 0) {
       return;
     }
@@ -2283,7 +2312,7 @@ namespace stream {
     video::capture(session->mail, session->config.monitor, session);
   }
 
-  void audioThread(session_t *session) {
+  void audioThread(std::shared_ptr<session_t> session) {
     auto fg = util::fail_guard([&]() {
       session::stop(*session);
     });
@@ -2291,7 +2320,7 @@ namespace stream {
     while_starting_do_nothing(session->state);
 
     auto ref = broadcast.ref();
-    auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
+    auto error = recv_ping(session.get(), ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
     if (error < 0) {
       return;
     }
@@ -2485,8 +2514,9 @@ namespace stream {
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
-      session.audioThread = std::thread {audioThread, &session};
-      session.videoThread = std::thread {videoThread, &session};
+      auto session_ref = session.shared_from_this();
+      session.audioThread = std::thread {audioThread, session_ref};
+      session.videoThread = std::thread {videoThread, std::move(session_ref)};
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
 

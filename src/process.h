@@ -130,8 +130,7 @@ namespace proc {
 
     ~proc_t();
 
-    const std::vector<ctx_t> &get_apps() const;
-    std::vector<ctx_t> &get_apps();
+    std::vector<ctx_t> get_apps() const;
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();

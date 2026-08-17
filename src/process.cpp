@@ -8,7 +8,9 @@
  #define BOOST_PROCESS_VERSION 1
 #endif
 // standard includes
+#include <atomic>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -53,6 +55,16 @@ namespace proc {
   namespace pt = boost::property_tree;
 
   proc_t proc;
+
+  // proc_t is movable during apps.json refresh, so the lifecycle lock must not
+  // be a member. All mutating lifecycle operations share this process-wide
+  // recursive lock. running() uses try_lock plus the atomic snapshot so the
+  // latency-sensitive control loop never waits behind a long undo command.
+  static std::recursive_mutex lifecycle_mutex;
+  static std::atomic_int active_app_id {0};
+#ifdef _WIN32
+  static std::atomic_uint64_t display_task_generation {0};
+#endif
 
   int input_only_app_id = -1;
   std::string input_only_app_id_str;
@@ -163,7 +175,9 @@ namespace proc {
   }
 
   void proc_t::launch_input_only() {
+    std::lock_guard lock(lifecycle_mutex);
     _app_id = input_only_app_id;
+    active_app_id.store(_app_id, std::memory_order_release);
     _app_name = "Remote Input";
     _app.uuid = REMOTE_INPUT_UUID;
     _app.terminate_on_pause = true;
@@ -176,6 +190,7 @@ namespace proc {
   }
 
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    std::lock_guard lock(lifecycle_mutex);
     if (_app_id == input_only_app_id) {
       terminate(false, false);
       std::this_thread::sleep_for(1s);
@@ -186,6 +201,7 @@ namespace proc {
 
     _app = app;
     _app_id = util::from_view(app.id);
+    active_app_id.store(_app_id, std::memory_order_release);
     _app_name = app.name;
     _launch_session = launch_session;
     allow_client_commands = app.allow_client_commands;
@@ -247,12 +263,9 @@ namespace proc {
 
       if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
         // Capture the user's pre-stream display topology BEFORE we add a virtual
-        // display or otherwise touch the layout. The RAII slot lives until either
-        // proc::terminate() resets it (normal exit) or static teardown / signal
-        // handler resets it (abnormal exit), at which point the destructor restores
-        // the captured paths+modes via SetDisplayConfig. This is what guarantees
-        // physical displays come back in their original arrangement (extend / clone /
-        // internal-only) instead of getting stuck deactivated.
+        // display or otherwise touch the layout. The RAII slot restores orderly
+        // exits, while its persisted recovery snapshot handles hard process death
+        // on the next Apollo start. Both replay the exact captured paths+modes.
         auto& topology_slot = VDISPLAY::topology_snapshot_slot();
         if (!topology_slot) {
           topology_slot = std::make_unique<VDISPLAY::display_topology_snapshot_t>();
@@ -511,59 +524,68 @@ namespace proc {
     _app_launch_time = std::chrono::steady_clock::now();
 
   #ifdef _WIN32
-    auto resetHDRThread = std::thread([this, enable_hdr = launch_session->enable_hdr]{
-      // Windows doesn't seem to be able to set HDR correctly when a display is just connected / changed resolution,
-      // so we have tooggle HDR for the virtual display manually after a delay.
-      auto retryInterval = 200ms;
-      while (is_changing_settings_going_to_fail()) {
-        if (retryInterval > 2s) {
-          BOOST_LOG(warning) << "Restoring HDR settings failed due to retry timeout!";
-          return;
-        }
-        std::this_thread::sleep_for(retryInterval);
-        retryInterval *= 2;
+    // The delayed HDR workaround must not retain `this`: terminate()/refresh()
+    // can reset or move proc_t while this detached task is sleeping. Capture an
+    // immutable display name and record all teardown state before detaching.
+    if (!display_name.empty()) {
+      const std::string current_display = display_name;
+      const auto current_display_w = platf::from_utf8(current_display);
+      initial_hdr = VDISPLAY::getDisplayHDRByName(current_display_w.c_str());
+      const bool automatic_hdr = config::video.dd.hdr_option == config::video_t::dd_t::hdr_option_e::automatic;
+      const auto task_generation = display_task_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+      if (automatic_hdr) {
+        mode_changed_display = current_display;
       }
 
-      retryInterval = 200ms;
-      while (this->display_name.empty()) {
-        if (retryInterval > 2s) {
-          BOOST_LOG(warning) << "Not getting current display in time! HDR will not be toggled.";
+      std::thread reset_hdr_thread([
+        current_display,
+        initial_hdr_snapshot = initial_hdr,
+        automatic_hdr,
+        enable_hdr = launch_session->enable_hdr,
+        task_generation
+      ] {
+        auto retry_interval = 200ms;
+        while (is_changing_settings_going_to_fail()) {
+          if (display_task_generation.load(std::memory_order_acquire) != task_generation) {
+            return;
+          }
+          if (retry_interval > 2s) {
+            BOOST_LOG(warning) << "Restoring HDR settings failed due to retry timeout!";
+            return;
+          }
+          std::this_thread::sleep_for(retry_interval);
+          retry_interval *= 2;
+        }
+
+        // Serialize the actual display mutation with terminate(). If teardown
+        // won the race, the generation check cancels this stale task. If this
+        // task won, terminate() runs next and restores the captured HDR state.
+        std::lock_guard lifecycle_lock(lifecycle_mutex);
+        if (display_task_generation.load(std::memory_order_acquire) != task_generation) {
           return;
         }
-        std::this_thread::sleep_for(retryInterval);
-        retryInterval *= 2;
-      }
 
-      // We should have got the actual streaming display by now
-      std::string currentDisplay = this->display_name;
-      auto currentDisplayW = platf::from_utf8(currentDisplay);
-
-      initial_hdr = VDISPLAY::getDisplayHDRByName(currentDisplayW.c_str());
-
-      if (config::video.dd.hdr_option == config::video_t::dd_t::hdr_option_e::automatic) {
-        mode_changed_display = currentDisplay;
-
-        // Try turn off HDR whatever
-        // As we always have to apply the workaround by turining off HDR first
-        VDISPLAY::setDisplayHDRByName(currentDisplayW.c_str(), false);
-
-        if (enable_hdr) {
-          if (VDISPLAY::setDisplayHDRByName(currentDisplayW.c_str(), true)) {
-            BOOST_LOG(info) << "HDR enabled for display " << currentDisplay;
+        const auto display_w = platf::from_utf8(current_display);
+        if (automatic_hdr) {
+          VDISPLAY::setDisplayHDRByName(display_w.c_str(), false);
+          if (enable_hdr) {
+            if (VDISPLAY::setDisplayHDRByName(display_w.c_str(), true)) {
+              BOOST_LOG(info) << "HDR enabled for display " << current_display;
+            } else {
+              BOOST_LOG(info) << "HDR enable failed for display " << current_display;
+            }
+          }
+        } else if (initial_hdr_snapshot) {
+          if (VDISPLAY::setDisplayHDRByName(display_w.c_str(), false) &&
+              VDISPLAY::setDisplayHDRByName(display_w.c_str(), true)) {
+            BOOST_LOG(info) << "HDR toggled successfully for display " << current_display;
           } else {
-            BOOST_LOG(info) << "HDR enable failed for display " << currentDisplay;
+            BOOST_LOG(info) << "HDR toggle failed for display " << current_display;
           }
         }
-      } else if (initial_hdr) {
-        if (VDISPLAY::setDisplayHDRByName(currentDisplayW.c_str(), false) && VDISPLAY::setDisplayHDRByName(currentDisplayW.c_str(), true)) {
-          BOOST_LOG(info) << "HDR toggled successfully for display " << currentDisplay;
-        } else {
-          BOOST_LOG(info) << "HDR toggle failed for display " << currentDisplay;
-        }
-      }
-    });
-
-    resetHDRThread.detach();
+      });
+      reset_hdr_thread.detach();
+    }
   #endif
 
     fg.disable();
@@ -576,6 +598,10 @@ namespace proc {
   }
 
   int proc_t::running() {
+    std::unique_lock lock(lifecycle_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+      return active_app_id.load(std::memory_order_acquire);
+    }
 #ifndef _WIN32
     // On POSIX OSes, we must periodically wait for our children to avoid
     // them becoming zombies. This must be synchronized carefully with
@@ -617,6 +643,7 @@ namespace proc {
   }
 
   void proc_t::resume() {
+    std::lock_guard lock(lifecycle_mutex);
     BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
 
     if (!_app.state_cmds.empty()) {
@@ -661,6 +688,7 @@ namespace proc {
   }
 
   void proc_t::pause() {
+    std::lock_guard lock(lifecycle_mutex);
     if (!running()) {
       BOOST_LOG(info) << "Session already stopped, do not run pause commands.";
       return;
@@ -719,7 +747,12 @@ namespace proc {
   }
 
   void proc_t::terminate(bool immediate, bool needs_refresh) {
+    std::lock_guard lock(lifecycle_mutex);
     std::error_code ec;
+#ifdef _WIN32
+    display_task_generation.fetch_add(1, std::memory_order_acq_rel);
+#endif
+    active_app_id.store(0, std::memory_order_release);
     placebo = false;
 
     if (!immediate) {
@@ -784,8 +817,9 @@ namespace proc {
       // Restore the pre-stream display topology now (normal-exit path). Resetting
       // the unique_ptr triggers display_topology_snapshot_t::~display_topology_snapshot_t,
       // which calls SetDisplayConfig with the originally-captured path+mode arrays.
-      // If we crash or get a signal before reaching here, the static slot's destructor
-      // will perform the same restore on process teardown.
+      // Orderly signal/teardown paths reset the slot directly. If the process is
+      // terminated without destructors, the persisted snapshot is restored on the
+      // next Apollo start.
       VDISPLAY::topology_snapshot_slot().reset();
     }
 
@@ -836,11 +870,8 @@ namespace proc {
     }
   }
 
-  const std::vector<ctx_t> &proc_t::get_apps() const {
-    return _apps;
-  }
-
-  std::vector<ctx_t> &proc_t::get_apps() {
+  std::vector<ctx_t> proc_t::get_apps() const {
+    std::lock_guard lock(lifecycle_mutex);
     return _apps;
   }
 
@@ -849,6 +880,7 @@ namespace proc {
   // Returns default image if image configuration is not set.
   // Returns http content-type header compatible image type.
   std::string proc_t::get_app_image(int app_id) {
+    std::lock_guard lock(lifecycle_mutex);
     auto iter = std::find_if(_apps.begin(), _apps.end(), [&app_id](const auto app) {
       return app.id == std::to_string(app_id);
     });
@@ -858,14 +890,17 @@ namespace proc {
   }
 
   std::string proc_t::get_last_run_app_name() {
+    std::lock_guard lock(lifecycle_mutex);
     return _app_name;
   }
 
   std::string proc_t::get_running_app_uuid() {
+    std::lock_guard lock(lifecycle_mutex);
     return _app.uuid;
   }
 
   boost::process::environment proc_t::get_env() {
+    std::lock_guard lock(lifecycle_mutex);
     return _env;
   }
 
@@ -1585,6 +1620,7 @@ namespace proc {
   }
 
   void refresh(const std::string &file_name, bool needs_terminate) {
+    std::lock_guard lock(lifecycle_mutex);
     if (needs_terminate) {
       proc.terminate(false, false);
     }
@@ -1606,6 +1642,7 @@ namespace proc {
 
     if (proc_opt) {
       proc = std::move(*proc_opt);
+      active_app_id.store(0, std::memory_order_release);
     }
   }
 }  // namespace proc

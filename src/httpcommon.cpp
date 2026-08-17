@@ -7,6 +7,7 @@
 // standard includes
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <utility>
 
 // lib includes
@@ -44,6 +45,11 @@ namespace http {
   uuid_util::uuid_t uuid;
   net::net_e origin_web_ui_allowed;
 
+  std::recursive_mutex &state_file_mutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+  }
+
   int init() {
     bool clean_slate = config::sunshine.flags[config::flag::FRESH_STATE];
     origin_web_ui_allowed = net::from_enum_string(config::nvhttp.origin_web_ui_allowed);
@@ -54,6 +60,21 @@ namespace http {
       auto dir = std::filesystem::temp_directory_path() / "Sunshine"sv;
       config::nvhttp.cert = (dir / ("cert-"s + unique_id)).string();
       config::nvhttp.pkey = (dir / ("pkey-"s + unique_id)).string();
+    }
+
+    const auto secure_existing_file = [](const std::string &path, std::string_view description) {
+      if (fs::exists(path) && file_handler::harden_private_file_permissions(path.c_str())) {
+        BOOST_LOG(fatal) << "Unable to secure the existing "sv << description;
+        return false;
+      }
+      return true;
+    };
+
+    if (!secure_existing_file(config::nvhttp.pkey, "private key file"sv) ||
+        !secure_existing_file(config::nvhttp.file_state, "pairing state file"sv) ||
+        (config::sunshine.credentials_file != config::nvhttp.file_state &&
+         !secure_existing_file(config::sunshine.credentials_file, "credentials file"sv))) {
+      return -1;
     }
 
     if ((!fs::exists(config::nvhttp.pkey) || !fs::exists(config::nvhttp.cert)) &&
@@ -106,6 +127,7 @@ namespace http {
   }
 
   int save_user_creds(const std::string &file, const std::string &username, const std::string &password, bool run_our_mouth) {
+    std::lock_guard lock(state_file_mutex());
     nlohmann::json outputTree;
 
     if (fs::exists(file)) {
@@ -119,25 +141,24 @@ namespace http {
     }
 
     auto salt = crypto::rand_alphabet(16);
-    constexpr int CURRENT_HASH_VERSION = 3;
     outputTree["username"] = username;
     outputTree["salt"] = salt;
     outputTree["password"] = hash_password(password, salt, CURRENT_HASH_VERSION);
     // v1 = single SHA-256, v2 = iterated 100k SHA-256, v3 = PBKDF2-HMAC-SHA256 600k
     outputTree["hash_version"] = CURRENT_HASH_VERSION;
-    try {
-      std::ofstream out(file);
-      out << outputTree.dump(4);  // Pretty-print with an indent of 4 spaces.
-    } catch (std::exception &e) {
-      BOOST_LOG(error) << "error writing to the credentials file, perhaps try this again as an administrator? Details: "sv << e.what();
+    if (file_handler::write_private_file(file.c_str(), outputTree.dump(4))) {
+      BOOST_LOG(error) << "Couldn't atomically write the credentials file"sv;
       return -1;
     }
 
-    BOOST_LOG(info) << "New credentials have been created"sv;
+    if (run_our_mouth) {
+      BOOST_LOG(info) << "New credentials have been created"sv;
+    }
     return 0;
   }
 
   bool user_creds_exist(const std::string &file) {
+    std::lock_guard lock(state_file_mutex());
     if (!fs::exists(file)) {
       return false;
     }
@@ -156,6 +177,7 @@ namespace http {
   }
 
   int reload_user_creds(const std::string &file) {
+    std::lock_guard lock(state_file_mutex());
     pt::ptree inputTree;
     try {
       pt::read_json(file, inputTree);
@@ -197,35 +219,13 @@ namespace http {
       return -1;
     }
 
-    // Write private key to a temp file, set permissions, then rename to avoid TOCTOU
-    auto pkey_tmp = pkey + ".tmp";
-    if (file_handler::write_file(pkey_tmp.c_str(), creds.pkey)) {
+    if (file_handler::write_private_file(pkey.c_str(), creds.pkey)) {
       BOOST_LOG(error) << "Couldn't open ["sv << config::nvhttp.pkey << ']';
-      return -1;
-    }
-    fs::permissions(pkey_tmp, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, err_code);
-    if (err_code) {
-      BOOST_LOG(error) << "Couldn't set permissions on temp pkey: "sv << err_code.message();
-      fs::remove(pkey_tmp, err_code);
-      return -1;
-    }
-    fs::rename(pkey_tmp, pkey_path, err_code);
-    if (err_code) {
-      BOOST_LOG(error) << "Couldn't rename temp pkey: "sv << err_code.message();
-      fs::remove(pkey_tmp, err_code);
       return -1;
     }
 
     if (file_handler::write_file(cert.c_str(), creds.x509)) {
       BOOST_LOG(error) << "Couldn't open ["sv << config::nvhttp.cert << ']';
-      return -1;
-    }
-
-    // pkey permissions already set above via temp file
-    fs::permissions(pkey_path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, err_code);
-
-    if (err_code) {
-      BOOST_LOG(error) << "Couldn't change permissions of ["sv << config::nvhttp.pkey << "] :"sv << err_code.message();
       return -1;
     }
 

@@ -51,4 +51,18 @@ namespace file_handler {
    * @examples_end
    */
   int write_file(const char *path, const std::string_view &contents);
+
+  /**
+   * @brief Writes a file atomically with owner/SYSTEM/Administrators-only access.
+   * @param path The path of the private file.
+   * @param contents The contents to write.
+   * @return ``0`` on success, ``-1`` on failure.
+   */
+  int write_private_file(const char *path, const std::string_view &contents);
+
+  /**
+   * @brief Restrict an existing file to its owner and privileged system accounts.
+   * @return ``0`` on success, ``-1`` on failure.
+   */
+  int harden_private_file_permissions(const char *path);
 }  // namespace file_handler

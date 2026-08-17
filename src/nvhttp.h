@@ -120,6 +120,9 @@ namespace nvhttp {
       if (!serverchallenge.empty()) {
         OPENSSL_cleanse(serverchallenge.data(), serverchallenge.size());
       }
+      if (!async_insert_pin.salt.empty()) {
+        OPENSSL_cleanse(async_insert_pin.salt.data(), async_insert_pin.salt.size());
+      }
     }
 
     struct {
@@ -141,6 +144,9 @@ namespace nvhttp {
         response;
       std::string salt = {};
     } async_insert_pin;
+
+    std::string client_ip = {};
+    std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now();
 
     /**
      * @brief used as a security measure to prevent out of order calls

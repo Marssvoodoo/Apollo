@@ -265,6 +265,8 @@ namespace video {
   extern encoder_t videotoolbox;
 #endif
 
+  using channel_data_t = std::shared_ptr<void>;
+
   struct packet_raw_t {
     virtual ~packet_raw_t() = default;
 
@@ -289,7 +291,7 @@ namespace video {
     };
 
     std::vector<replace_t> *replacements = nullptr;
-    void *channel_data = nullptr;
+    channel_data_t channel_data;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
   };
@@ -374,7 +376,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    channel_data_t channel_data
   );
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure);

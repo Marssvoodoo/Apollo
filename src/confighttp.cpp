@@ -292,6 +292,20 @@ namespace confighttp {
     response->write(code, tree.dump(), headers);
   }
 
+  void internal_server_error(resp_https_t response, const std::string &error_message) {
+    constexpr SimpleWeb::StatusCode code = SimpleWeb::StatusCode::server_error_internal_server_error;
+    nlohmann::json tree;
+    tree["status_code"] = static_cast<int>(code);
+    tree["status"] = false;
+    tree["error"] = error_message;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    headers.emplace("Cache-Control", "no-store");
+    headers.emplace("X-Frame-Options", "DENY");
+    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    response->write(code, tree.dump(), headers);
+  }
+
 
   /**
    * @brief Send a 403 Forbidden response.
@@ -1141,6 +1155,12 @@ namespace confighttp {
     output_tree["vdisplayStatus"] = (int)proc::vDisplayDriverStatus;
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    // These legacy settings are intentionally accepted by the file parser so
+    // old installations get an explicit warning, but they are not supported
+    // by the web API and must not be echoed back into a future save request.
+    vars.erase("pin_required");
+    vars.erase("smart_reconnect");
+    vars.erase("smart_reconnect_legacy_ip_match");
     for (auto &[name, value] : vars) {
       output_tree[name] = value;
     }
@@ -1188,67 +1208,48 @@ namespace confighttp {
     std::stringstream ss;
     ss << request->content.rdbuf();
     try {
-      // Input validation: only allow known-safe configuration keys (allowlist)
+      // Input validation: only allow options consumed by config::apply_config.
+      // The consistency test locks this list to the parser and to every web UI
+      // option so future controls cannot silently fail to persist.
       static const std::set<std::string> allowed_keys = {
-        // UI preferences
-        "locale", "sunshine_name", "theme",
-        // Stream quality / encoder settings
-        "min_fps_factor", "min_threads", "hevc_mode", "av1_mode",
-        "encoder", "min_log_level", "fec_percentage",
-        "channels", "qp", "min_bitrate", "max_bitrate",
-        "video_format",
-        // Audio/video settings
-        "audio_sink", "virtual_sink", "install_steam_audio_drivers",
-        "adapter_name", "output_name", "resolutions", "fps",
-        // Network / UPnP
-        "upnp", "address_family", "port",
-        "lan_encryption_mode", "wan_encryption_mode",
-        // Input settings
-        "back_button_timeout", "key_repeat_delay", "key_repeat_period",
-        "always_send_scancodes", "key_rightalt_to_key_win",
-        "gamepad", "ds4_back_as_touchpad_click", "motion_as_ds4",
-        "touchpad_as_ds4",
-        // Pairing / discovery / tray
-        "enable_pairing", "pin_required",
-        "enable_discovery",
-        "enable_tray", "tray_hide_control_options",
-        // Display settings
-        "notify_pre_releases",
-        // Capture settings
-        "capture", "dd_hdr_option",
-        // Command preparations
-        "global_prep_cmd", "server_cmd",
-        // Adaptive streaming
-        "adaptive_bitrate", "adaptive_fec", "frame_pacing",
-        "thermal_protection", "max_bitrate_adaptive",
-        "min_fec_percentage", "max_fec_percentage",
-        "max_pacing_buffer_ms",
-        "thermal_step_down_resolution", "thermal_step_down_fps",
-        "thermal_recovery_delay_s",
-        "smart_reconnect", "smart_reconnect_timeout_s", "smart_reconnect_legacy_ip_match",
-        "max_suspended_sessions",
-        "wifi_quality_signaling", "wifi_preemptive_drop_threshold",
-        // Audio
-        "audio_codec", "lossless",
-        // Telemetry
-        "metrics",
+        "adapter_name", "adaptive_bitrate", "adaptive_fec", "address_family", "always_send_scancodes", "amd_coder",
+        "amd_enforce_hrd", "amd_preanalysis", "amd_quality", "amd_rc", "amd_usage", "amd_vbaq",
+        "audio_sink", "auto_capture_sink", "av1_mode", "back_button_timeout", "capture", "cert",
+        "controller", "credentials_file", "dd_config_revert_delay", "dd_config_revert_on_disconnect", "dd_configuration_option", "dd_hdr_option",
+        "dd_manual_refresh_rate", "dd_manual_resolution", "dd_mode_remapping", "dd_refresh_rate_option", "dd_resolution_option", "dd_wa_hdr_toggle_delay",
+        "double_refreshrate", "ds4_back_as_touchpad_click", "ds5_inputtino_randomize_mac", "enable_discovery", "enable_input_only_mode", "enable_pairing",
+        "encoder", "envvar_compatibility_mode", "external_ip", "fallback_mode", "fec_percentage", "file_apps",
+        "file_state", "forward_rumble", "frame_pacing", "gamepad", "global_prep_cmd", "global_state_cmd",
+        "headless_mode", "hevc_mode", "hide_tray_controls", "high_resolution_scrolling", "ignore_encoder_probe_failure", "install_steam_audio_drivers",
+        "isolated_virtual_display_option", "keep_sink_default", "key_repeat_delay", "key_repeat_frequency", "key_rightalt_to_key_win", "keybindings",
+        "keyboard", "lan_encryption_mode", "legacy_ordering", "limit_framerate", "locale", "log_path",
+        "max_bitrate", "max_bitrate_adaptive", "max_fec_percentage", "max_pacing_buffer_ms", "max_suspended_sessions", "min_bitrate",
+        "min_fec_percentage", "min_log_level", "min_threads", "minimum_fps_target", "motion_as_ds4", "mouse",
+        "native_pen_touch", "notify_pre_releases", "nvenc_h264_cavlc", "nvenc_intra_refresh", "nvenc_latency_over_power", "nvenc_opengl_vulkan_on_dxgi",
+        "nvenc_preset", "nvenc_realtime_hags", "nvenc_spatial_aq", "nvenc_twopass", "nvenc_vbv_increase", "origin_web_ui_allowed",
+        "output_name", "ping_timeout", "pkey", "port", "qp", "qsv_coder",
+        "qsv_preset", "qsv_slow_hevc", "server_cmd", "smart_reconnect_timeout_s", "stream_audio", "sunshine_name",
+        "sw_preset", "sw_tune", "system_tray", "thermal_protection", "thermal_recovery_delay_s", "thermal_step_down_fps",
+        "thermal_step_down_resolution", "touchpad_as_ds4", "upnp", "vaapi_strict_rc_buffer", "virtual_sink", "vt_coder",
+        "vt_realtime", "vt_software", "wan_encryption_mode", "wifi_preemptive_drop_threshold", "wifi_quality_signaling",
       };
       std::stringstream config_stream;
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
-      // Surface rejected keys to the UI instead of silently dropping them.
-      // The UI was previously writing values that fell outside this list
-      // (notably the new pin_required / adaptive-streaming toggles before
-      // they were added) and the only signal was a server-side log. The
-      // rejected_keys array in the response lets the UI flag bad calls.
+      if (!input_tree.is_object()) {
+        bad_request(response, request, "Configuration payload must be a JSON object");
+        return;
+      }
+
       nlohmann::json rejected_keys = nlohmann::json::array();
       for (const auto &[k, v] : input_tree.items()) {
-        if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
-          continue;
-        }
         if (!allowed_keys.count(k)) {
           BOOST_LOG(warning) << "Rejected config key not in allowlist: " << k;
           rejected_keys.push_back(k);
+          continue;
+        }
+
+        if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
           continue;
         }
 
@@ -1257,6 +1258,7 @@ namespace confighttp {
           auto val = v.get<std::string>();
           if (val.find('\n') != std::string::npos || val.find('\r') != std::string::npos) {
             BOOST_LOG(warning) << "Rejected config value with newline for key: " << k;
+            rejected_keys.push_back(k);
             continue;
           }
         }
@@ -1265,11 +1267,27 @@ namespace confighttp {
         // we should migrate the config file to straight json and get rid of all this nonsense
         config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
       }
-      file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
-      output_tree["status"] = true;
+
       if (!rejected_keys.empty()) {
+        output_tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_bad_request);
+        output_tree["status"] = false;
+        output_tree["error"] = "Unsupported or invalid configuration keys";
         output_tree["rejected_keys"] = rejected_keys;
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        headers.emplace("X-Frame-Options", "DENY");
+        headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+        response->write(SimpleWeb::StatusCode::client_error_bad_request, output_tree.dump(), headers);
+        return;
       }
+
+      if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+        BOOST_LOG(error) << "SaveConfig: failed to atomically write " << config::sunshine.config_file;
+        internal_server_error(response, "Failed to write configuration file");
+        return;
+      }
+
+      output_tree["status"] = true;
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "SaveConfig: "sv << e.what();
@@ -1372,10 +1390,23 @@ namespace confighttp {
    * @api_examples{/api/password| POST| {"currentUsername":"admin","currentPassword":"admin","newUsername":"admin","newPassword":"admin","confirmNewPassword":"admin"}}
    */
   void savePassword(resp_https_t response, req_https_t request) {
-    if ((!config::sunshine.username.empty() && !authenticate(response, request)) || !validateContentType(response, request, "application/json"))
+    if (!validateContentType(response, request, "application/json")) {
       return;
-    if (!config::sunshine.username.empty() && !verifyCsrf(response, request))
+    }
+    if (config::sunshine.username.empty()) {
+      // First-run setup has no session or CSRF token yet. Restrict account
+      // creation to the host itself; honoring the normal LAN UI boundary here
+      // still lets the first device on the network race the operator and claim
+      // the administrator account.
+      const auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+      if (net::from_address(address) != net::PC) {
+        BOOST_LOG(warning) << "Web UI: rejected non-local first-run account setup from [" << address << ']';
+        send_forbidden(response, request, "Initial administrator setup must be completed on the Apollo host");
+        return;
+      }
+    } else if (!authenticate(response, request) || !verifyCsrf(response, request)) {
       return;
+    }
     print_req(request);
     std::vector<std::string> errors;
     std::stringstream ss;
@@ -1772,6 +1803,20 @@ namespace confighttp {
       });
       if (username != config::sunshine.username || !util::crypto_equal(hash, config::sunshine.password))
         return;
+
+      if (config::sunshine.hash_version < http::CURRENT_HASH_VERSION) {
+        // The plaintext password is available only during this verified login,
+        // so this is the safe point to migrate legacy hashes. The state-file
+        // lock and atomic private writer preserve the paired-device JSON stored
+        // in the same file.
+        std::lock_guard state_lock(http::state_file_mutex());
+        if (http::save_user_creds(config::sunshine.credentials_file, username, password) == 0 &&
+            http::reload_user_creds(config::sunshine.credentials_file) == 0) {
+          BOOST_LOG(info) << "Upgraded legacy Web UI credentials to PBKDF2 v"sv << http::CURRENT_HASH_VERSION;
+        } else {
+          BOOST_LOG(error) << "Failed to upgrade legacy Web UI credentials"sv;
+        }
+      }
       {
         std::lock_guard<std::mutex> lock(session_mutex);
         login_attempts_by_ip.erase(address_key);  // reset on success

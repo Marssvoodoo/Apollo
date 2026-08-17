@@ -10,11 +10,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <ctime>
+#include <cstring>
 #include <filesystem>
 #include <format>
-#include <fstream>
-#include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -87,6 +85,9 @@ namespace nvhttp {
   // PIN_LEN_OTP matches request_otp / rand_alphabet output.
   static constexpr size_t PIN_LEN_INTERACTIVE = 4;
   static constexpr size_t PIN_LEN_OTP = 6;
+  static constexpr size_t MAX_PAIRING_SESSIONS = 32;
+  static constexpr size_t MAX_PAIRING_SESSIONS_PER_IP = 3;
+  static constexpr auto PAIRING_SESSION_TIMEOUT = 2min;
 
   class SunshineHTTPSServer: public SimpleWeb::ServerBase<SunshineHTTPS> {
   public:
@@ -99,9 +100,13 @@ namespace nvhttp {
       context.use_certificate_chain_file(certification_file);
       context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
 
-      // Enable TLS session resumption for faster reconnections
-      SSL_CTX_set_session_cache_mode(context.native_handle(), SSL_SESS_CACHE_SERVER);
-      SSL_CTX_set_timeout(context.native_handle(), 300);
+      // Every GameStream connection must run the application-level client
+      // certificate check below. TLS tickets/cache entries can resume a prior
+      // handshake without repeating that check, so disable resumption rather
+      // than allowing a revoked/unpaired certificate to reuse cached state.
+      SSL_CTX_set_min_proto_version(context.native_handle(), TLS1_2_VERSION);
+      SSL_CTX_set_session_cache_mode(context.native_handle(), SSL_SESS_CACHE_OFF);
+      SSL_CTX_set_options(context.native_handle(), SSL_OP_NO_TICKET);
     }
 
     std::function<bool(std::shared_ptr<Request>, SSL*)> verify;
@@ -231,6 +236,7 @@ namespace nvhttp {
   }
 
   void save_state() {
+    std::lock_guard state_lock(http::state_file_mutex());
     nlohmann::json root = nlohmann::json::object();
     // If the state file exists, try to read it.
     if (fs::exists(config::nvhttp.file_state)) {
@@ -304,16 +310,13 @@ namespace nvhttp {
 
     root["root"]["named_devices"] = named_cert_nodes;
 
-    try {
-      std::ofstream out(config::nvhttp.file_state);
-      out << root.dump(4);  // Pretty-print with an indent of 4 spaces.
-    } catch (std::exception &e) {
-      BOOST_LOG(error) << "Couldn't write "sv << config::nvhttp.file_state << ": "sv << e.what();
-      return;
+    if (file_handler::write_private_file(config::nvhttp.file_state.c_str(), root.dump(4))) {
+      BOOST_LOG(error) << "Couldn't atomically write "sv << config::nvhttp.file_state;
     }
   }
 
   void load_state() {
+    std::lock_guard state_lock(http::state_file_mutex());
     if (!fs::exists(config::nvhttp.file_state)) {
       BOOST_LOG(info) << "File "sv << config::nvhttp.file_state << " doesn't exist"sv;
       http::unique_id = uuid_util::uuid_t::generate().string();
@@ -429,10 +432,10 @@ namespace nvhttp {
       launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
 
       // Generate the unique identifiers for this connection that we will send later during RTSP handshake
-      unsigned char raw_payload[8];
-      RAND_bytes(raw_payload, sizeof(raw_payload));
+      const auto raw_payload = crypto::rand(8);
       launch_session->av_ping_payload = util::hex_vec(raw_payload);
-      RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
+      const auto connect_data = crypto::rand(sizeof(launch_session->control_connect_data));
+      std::memcpy(&launch_session->control_connect_data, connect_data.data(), connect_data.size());
 
       launch_session->iv.resize(16);
       uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
@@ -457,13 +460,13 @@ namespace nvhttp {
       try {
         if (x == 0) {
           launch_session->width = std::stoi(segment);
-          if (launch_session->width <= 0 || launch_session->width > 16384) {
+          if (launch_session->width <= 0 || launch_session->width > 8192) {
             x = -1; break;  // invalid, trigger fallback
           }
         }
         if (x == 1) {
           launch_session->height = std::stoi(segment);
-          if (launch_session->height <= 0 || launch_session->height > 16384) {
+          if (launch_session->height <= 0 || launch_session->height > 8192) {
             x = -1; break;
           }
         }
@@ -482,6 +485,14 @@ namespace nvhttp {
         x = -1; break;  // parse error, trigger fallback
       }
       x++;
+    }
+
+    // Bound the total decoded surface to roughly 8K. Per-axis limits alone
+    // allowed a 16384x16384 request, which can force multi-gigabyte capture
+    // allocations before the encoder rejects it.
+    constexpr std::int64_t max_frame_pixels = 7680LL * 4320LL;
+    if (x == 2 && static_cast<std::int64_t>(launch_session->width) * launch_session->height > max_frame_pixels) {
+      x = -1;
     }
 
     // Parsing have failed or missing components
@@ -678,8 +689,9 @@ namespace nvhttp {
       named_cert_p->allow_client_commands = true;
       named_cert_p->always_use_virtual_display = false;
 
-      auto it = map_id_sess.find(client.uniqueID);
-      map_id_sess.erase(it);
+      // The session may already have been removed by a disconnect or timeout.
+      // Erasing by key is safe when it is absent; erasing end() is undefined.
+      map_id_sess.erase(client.uniqueID);
 
       add_authorized_client(named_cert_p);
     } else {
@@ -748,63 +760,6 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
-  // Append a single line to the security audit log alongside other Apollo
-  // state files (platf::appdata() — same dir as sunshine.conf / apps.json).
-  // Failures are logged once and swallowed; we never block pairing on this.
-  // Strip CR/LF and other control characters from client-controlled fields
-  // before they reach the audit log, so a crafted device name / uniqueID
-  // cannot inject newlines and forge or overwrite AUTO_PAIR records (which
-  // would defeat the log's tamper-evidence).
-  static std::string audit_sanitize(const std::string &s) {
-    std::string out;
-    out.reserve(s.size());
-    for (unsigned char c : s) {
-      out.push_back((c < 0x20 || c == 0x7f) ? '?' : static_cast<char>(c));
-    }
-    return out;
-  }
-
-  static void append_audit_log(const std::string &line) {
-    static std::mutex audit_mutex;
-    static std::atomic<bool> warned_open_failure {false};
-
-    std::lock_guard<std::mutex> lk(audit_mutex);
-    try {
-      auto path = platf::appdata() / "audit.log";
-      // std::ios::app uses O_APPEND on POSIX and FILE_APPEND_DATA on Win32,
-      // so concurrent writers (and other Apollo instances) won't tear lines.
-      std::ofstream out(path, std::ios::app | std::ios::out);
-      if (!out.is_open()) {
-        if (!warned_open_failure.exchange(true)) {
-          BOOST_LOG(error) << "Failed to open audit log at " << path.string()
-                           << " — security events will not be persisted";
-        }
-        return;
-      }
-      out << line << '\n';
-    } catch (const std::exception &e) {
-      if (!warned_open_failure.exchange(true)) {
-        BOOST_LOG(error) << "Audit log write failed: " << e.what();
-      }
-    }
-  }
-
-  // ISO 8601 UTC timestamp, e.g. "2026-05-01T17:42:09Z".
-  static std::string iso8601_utc_now() {
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    std::time_t t = system_clock::to_time_t(now);
-    std::tm tm_utc {};
-#ifdef _WIN32
-    gmtime_s(&tm_utc, &t);
-#else
-    gmtime_r(&t, &tm_utc);
-#endif
-    std::ostringstream ss;
-    ss << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%SZ");
-    return ss.str();
-  }
-
   template <class T>
   void pair(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
@@ -857,11 +812,36 @@ namespace nvhttp {
         sess.client.uniqueID = std::move(uniqID);
         sess.client.name = std::move(deviceName);
         sess.client.cert = util::from_hex_vec(get_arg(args, "clientcert"), true);
+        sess.client_ip = client_ip;
+        sess.created_at = std::chrono::steady_clock::now();
 
         BOOST_LOG(debug) << "Pairing session initiated for device: " << sess.client.name;
         std::lock_guard<std::recursive_mutex> lock(pairing_mutex);
 
-        if (map_id_sess.size() >= 10) {
+        const auto now = std::chrono::steady_clock::now();
+        std::erase_if(map_id_sess, [now](const auto &entry) {
+          return now - entry.second.created_at >= PAIRING_SESSION_TIMEOUT;
+        });
+
+        if (auto existing = map_id_sess.find(sess.client.uniqueID); existing != map_id_sess.end()) {
+          if (existing->second.client_ip != client_ip) {
+            tree.put("root.<xmlattr>.status_code", 409);
+            tree.put("root.<xmlattr>.status_message", "Pairing ID is already active from another address");
+            return;
+          }
+          map_id_sess.erase(existing);
+        }
+
+        const auto sessions_from_ip = std::count_if(map_id_sess.begin(), map_id_sess.end(), [&](const auto &entry) {
+          return entry.second.client_ip == client_ip;
+        });
+        if (sessions_from_ip >= MAX_PAIRING_SESSIONS_PER_IP) {
+          tree.put("root.<xmlattr>.status_code", 429);
+          tree.put("root.<xmlattr>.status_message", "Too many active pairing sessions from this address");
+          return;
+        }
+
+        if (map_id_sess.size() >= MAX_PAIRING_SESSIONS) {
           tree.put("root.<xmlattr>.status_code", 503);
           tree.put("root.<xmlattr>.status_message", "Too many active pairing sessions");
           return;
@@ -932,35 +912,7 @@ namespace nvhttp {
           return;
         }
 
-        if (!config::sunshine.pin_required) {
-          // PIN requirement disabled — auto-accept with fixed PIN "0000".
-          // Hard refusal when UPnP is on: the server is reachable from
-          // the public internet and "anyone who can reach the port can
-          // pair" is not an acceptable shape. The user must explicitly
-          // turn UPnP off before this toggle takes effect.
-          if (config::sunshine.flags[config::flag::UPNP]) {
-            BOOST_LOG(warning) << "Refusing pin_required=false pair attempt while UPnP is enabled "
-                                  "(device='" << ptr->second.client.name
-                               << "'). Turn UPnP off if you really want skip-PIN pairing.";
-            tree.put("root.paired", 0);
-            tree.put("root.<xmlattr>.status_code", 503);
-            tree.put("root.<xmlattr>.status_message", "Skip-PIN pairing disabled while UPnP is on");
-            return;
-          }
-          BOOST_LOG(warning) << "PIN requirement disabled — auto-accepting pairing for device: "
-                             << ptr->second.client.name << " (fixed PIN: 0000)";
-          // Persist a tamper-evident audit record for skip-PIN pair events.
-          // Format: "<ISO8601 UTC> AUTO_PAIR client=<name> ip=<ip> uid=<unique_id>"
-          {
-            std::ostringstream ev;
-            ev << iso8601_utc_now()
-               << " AUTO_PAIR client=" << audit_sanitize(ptr->second.client.name)
-               << " ip=" << client_ip
-               << " uid=" << audit_sanitize(ptr->second.client.uniqueID);
-            append_audit_log(ev.str());
-          }
-          getservercert(ptr->second, tree, "0000");
-        } else if (config::sunshine.flags[config::flag::PIN_STDIN]) {
+        if (config::sunshine.flags[config::flag::PIN_STDIN]) {
           std::string pin;
 
           std::cout << "Please insert pin: "sv;

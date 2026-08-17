@@ -192,7 +192,10 @@ namespace config {
     int thermal_step_down_resolution = 1080;
     int thermal_step_down_fps = 30;
     int thermal_recovery_delay_s = 30;
-    bool smart_reconnect = true;
+    // Disabled until reconnect authenticates the replacement peer with a
+    // proof-of-possession challenge over the existing session key. A 32-bit
+    // connect token is not an authentication boundary.
+    bool smart_reconnect = false;
     int smart_reconnect_timeout_s = 30;
     // For legacy clients without ML_FF_SESSION_ID_V1, the suspended-
     // session match defaults to "no, fall through to fresh pair" — an
@@ -287,7 +290,6 @@ namespace config {
   struct sunshine_t {
     bool hide_tray_controls;
     bool enable_pairing;
-    bool pin_required;  ///< When false, auto-accept pairing without PIN prompt
     bool enable_discovery;
     bool envvar_compatibility_mode;
     std::string locale;

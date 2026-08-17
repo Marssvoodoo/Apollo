@@ -48,3 +48,16 @@ INSTANTIATE_TEST_SUITE_P(
 TEST_P(EncoderTest, ValidateEncoder) {
   // todo:: test something besides fixture setup
 }
+
+TEST(VideoPacketLifetimeTest, PacketRetainsChannelOwner) {
+  auto owner = std::make_shared<int>(42);
+  std::weak_ptr<int> weak_owner = owner;
+  video::packet_raw_generic packet({}, 1, false);
+  packet.channel_data = owner;
+
+  owner.reset();
+  EXPECT_FALSE(weak_owner.expired());
+
+  packet.channel_data.reset();
+  EXPECT_TRUE(weak_owner.expired());
+}

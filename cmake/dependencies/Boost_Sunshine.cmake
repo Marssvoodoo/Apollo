@@ -84,6 +84,14 @@ if(NOT Boost_FOUND)
     FetchContent_MakeAvailable(Boost)
     set(FETCH_CONTENT_BOOST_USED TRUE)
 
+    # Simple-Web-Server still links the legacy header-only target name that is
+    # exported by packaged Boost configs. Boost's CMake superproject only
+    # creates Boost::headers, so provide the compatible alias for fallback
+    # builds (including Windows test builds).
+    if(NOT TARGET Boost::boost AND TARGET boost_headers)
+        add_library(Boost::boost ALIAS boost_headers)
+    endif()
+
     set(Boost_FOUND TRUE)  # cmake-lint: disable=C0103
     set(Boost_INCLUDE_DIRS  # cmake-lint: disable=C0103
             "$<BUILD_INTERFACE:${Boost_SOURCE_DIR}/libs/headers/include>")

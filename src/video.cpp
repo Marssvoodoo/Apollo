@@ -461,7 +461,7 @@ namespace video {
 
     config_t config;
     int frame_nr;
-    void *channel_data;
+    channel_data_t channel_data;
   };
 
   struct sync_session_t {
@@ -1420,7 +1420,7 @@ namespace video {
     }
   }
 
-  int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, const channel_data_t &channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto &frame = session.device->frame;
     frame->pts = frame_nr;
 
@@ -1494,7 +1494,7 @@ namespace video {
     return 0;
   }
 
-  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, const channel_data_t &channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto encoded_frame = session.encode_frame(frame_nr);
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
@@ -1514,7 +1514,7 @@ namespace video {
     return 0;
   }
 
-  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, const channel_data_t &channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     switch (session.encoder_type) {
     case encoder_type_e::AVCODEC:
       return encode_avcodec(frame_nr, static_cast<avcodec_encode_session_t &>(session), packets, channel_data, frame_timestamp);
@@ -1930,7 +1930,7 @@ namespace video {
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
-    void *channel_data
+    channel_data_t channel_data
   ) {
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
@@ -2375,7 +2375,7 @@ namespace video {
   void capture_async(
     safe::mail_t mail,
     config_t &config,
-    void *channel_data
+    channel_data_t channel_data
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -2459,7 +2459,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    channel_data_t channel_data
   ) {
     auto idr_events = mail->event<bool>(mail::idr);
 

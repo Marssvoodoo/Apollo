@@ -326,8 +326,8 @@ int main(int argc, char *argv[]) {
       std::_Exit(1);
     };
 
-    proc::proc.terminate();
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    proc::proc.terminate();
     shutdown_event->raise(true);
     display_device_deinit_guard = nullptr;
   };
@@ -348,6 +348,12 @@ int main(int argc, char *argv[]) {
   if (!platf_deinit_guard) {
     BOOST_LOG(error) << "Platform failed to initialize"sv;
   }
+
+#ifdef _WIN32
+  if (!VDISPLAY::recover_persisted_topology()) {
+    BOOST_LOG(warning) << "A persisted pre-stream display topology could not be restored; it will be retried on the next start"sv;
+  }
+#endif
 
   auto proc_deinit_guard = proc::init();
   if (!proc_deinit_guard) {

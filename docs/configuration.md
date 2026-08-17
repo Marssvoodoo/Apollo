@@ -238,6 +238,28 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### global_state_cmd
+
+Commands applied while at least one stream is active. The `do` command runs
+when the first stream starts and the matching `undo` command runs after the
+last stream stops. The default is an empty list.
+
+```ini
+global_state_cmd = []
+```
+
+### server_cmd
+
+Named host commands that explicitly authorized paired clients may invoke. Each
+entry contains a display `name`, a `cmd` string, and (on Windows) an optional
+`elevated` flag. Keep this list empty unless client-triggered host automation is
+required, and grant the server-command client permission only to trusted
+devices.
+
+```ini
+server_cmd = [{"name":"Toggle display","cmd":"display-toggle.exe","elevated":false}]
+```
+
 ### notify_pre_releases
 
 <table>
@@ -283,6 +305,21 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
 </table>
+
+### hide_tray_controls
+
+Hide stream and application controls from the system tray menu. The default is
+`disabled`.
+
+### enable_pairing
+
+Allow new Moonlight clients to pair with Apollo. The default is `enabled`.
+Disable it after pairing when the host should reject all new clients.
+
+### enable_discovery
+
+Advertise Apollo for automatic client discovery. The default is `enabled`.
+When disabled, clients must add the host address manually.
 
 ## Input
 
@@ -687,6 +724,16 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### enable_input_only_mode
+
+Expose an input-only session that forwards controls without video or audio.
+The default is `disabled`.
+
+### forward_rumble
+
+Forward controller rumble messages to the connected client. The default is
+`enabled`.
+
 ### keybindings
 
 <table>
@@ -873,6 +920,16 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### keep_sink_default
+
+Keep the selected virtual audio sink as the host default while streaming. The
+default is `enabled` when host audio output is disabled.
+
+### auto_capture_sink
+
+Automatically select the active capture sink when no explicit audio sink is
+configured. The default is `enabled`.
+
 ### adapter_name
 
 <table>
@@ -1039,6 +1096,22 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
 </table>
+
+### fallback_mode
+
+Display mode used when a client does not provide one or a stream is launched
+from the web UI. Leave empty for automatic selection, or use
+`WIDTHxHEIGHTxFPS` such as `1920x1080x60`.
+
+### headless_mode
+
+Permit capture through Apollo's virtual display path when no physical display
+is available. The default is `disabled`.
+
+### double_refreshrate
+
+Create a virtual display at twice the requested refresh rate while preserving
+the requested stream frame rate. The default is `disabled`.
 
 ### isolated_virtual_display_option
 
@@ -1930,6 +2003,26 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### limit_framerate
+
+Limit capture and encoding work to the requested stream frame rate. The
+default is `enabled`.
+
+### envvar_compatibility_mode
+
+Use legacy environment-variable expansion behavior for application commands.
+The default is `disabled`.
+
+### legacy_ordering
+
+Preserve legacy ordering for application and client command handling. The
+default is `disabled`.
+
+### ignore_encoder_probe_failure
+
+Continue startup when encoder probing fails. The default is `disabled`; enable
+only for diagnosis because the selected encoder may still be unusable.
+
 ### hevc_mode
 
 <table>
@@ -2378,6 +2471,11 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
 </table>
+
+### nvenc_intra_refresh
+
+Enable NVENC intra refresh for clients that cannot render a continuous stream
+reliably without periodic refresh regions. The default is `disabled`.
 
 ## Intel QuickSync Encoder
 

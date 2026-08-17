@@ -52,7 +52,7 @@ protected:
       std::regex(R"DELIM(bool_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM((?:double_f|double_between_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM(generic_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM(list_prep_cmd_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
+      std::regex(R"DELIM(list_(?:prep|server)_cmd_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM(map_int_int_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM")
     };
 
@@ -65,6 +65,26 @@ protected:
       }
     }
 
+    return options;
+  }
+
+  static std::set<std::string, std::less<>> extractWebConfigAllowlist() {
+    std::set<std::string, std::less<>> options;
+    const std::string content = file_handler::read_file("src/confighttp.cpp");
+    const auto start = content.find("static const std::set<std::string> allowed_keys");
+    if (start == std::string::npos) {
+      return options;
+    }
+    const auto end = content.find("};", start);
+    if (end == std::string::npos) {
+      return options;
+    }
+
+    const std::string allowlist = content.substr(start, end - start);
+    const std::regex keyPattern(R"DELIM("([^"]+)")DELIM");
+    for (std::sregex_iterator iter(allowlist.begin(), allowlist.end(), keyPattern), last; iter != last; ++iter) {
+      options.insert((*iter)[1].str());
+    }
     return options;
   }
 
@@ -442,9 +462,29 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
   const auto mdOptions = extractConfigMdOptions();
   const auto jsonOptions = extractEnJsonConfigOptions();
 
-  // Options that are internal/special and shouldn't be in UI/docs
+  // Options that are internal or intentionally config-file-only and therefore
+  // should not be presented as supported web controls.
   const std::set<std::string, std::less<>> internalOptions = {
-    "flags"  // Internal config flags, not user-configurable
+    "adaptive_bitrate",
+    "adaptive_fec",
+    "flags",
+    "frame_pacing",
+    "max_bitrate_adaptive",
+    "max_fec_percentage",
+    "max_pacing_buffer_ms",
+    "max_suspended_sessions",
+    "min_bitrate",
+    "min_fec_percentage",
+    "pin_required",
+    "smart_reconnect",
+    "smart_reconnect_legacy_ip_match",
+    "smart_reconnect_timeout_s",
+    "thermal_protection",
+    "thermal_recovery_delay_s",
+    "thermal_step_down_fps",
+    "thermal_step_down_resolution",
+    "wifi_preemptive_drop_threshold",
+    "wifi_quality_signaling"
   };
 
   std::vector<std::string> missingFromFiles;
@@ -465,6 +505,43 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
     }
     FAIL() << errorMsg;
   }
+}
+
+TEST_F(ConfigConsistencyTest, EveryWebOptionCanBeSaved) {
+  const auto htmlOptions = extractConfigHtmlOptions();
+  const auto allowedOptions = extractWebConfigAllowlist();
+  // These are members of the dd_mode_remapping JSON object, not top-level
+  // sunshine.conf options. The legacy HTML extractor intentionally walks the
+  // nested object so other consistency tests can inspect its content.
+  const std::set<std::string, std::less<>> nestedValueKeys = {
+    "mixed", "refresh_rate_only", "resolution_only"
+  };
+
+  ASSERT_FALSE(allowedOptions.empty()) << "Could not extract the web config allowlist";
+  for (const auto &[option, tab] : htmlOptions) {
+    if (nestedValueKeys.contains(option)) {
+      continue;
+    }
+    EXPECT_TRUE(allowedOptions.contains(option))
+      << "Web option '" << option << "' in tab '" << tab
+      << "' is not accepted by POST /api/config";
+  }
+}
+
+TEST_F(ConfigConsistencyTest, WebAllowlistContainsOnlyParsedOptions) {
+  const auto cppOptions = extractConfigCppOptions();
+  const auto allowedOptions = extractWebConfigAllowlist();
+
+  ASSERT_FALSE(allowedOptions.empty()) << "Could not extract the web config allowlist";
+  for (const auto &option : allowedOptions) {
+    EXPECT_TRUE(cppOptions.contains(option))
+      << "POST /api/config accepts '" << option
+      << "' but config::apply_config does not consume it";
+  }
+
+  EXPECT_FALSE(allowedOptions.contains("pin_required"));
+  EXPECT_FALSE(allowedOptions.contains("smart_reconnect"));
+  EXPECT_FALSE(allowedOptions.contains("smart_reconnect_legacy_ip_match"));
 }
 
 TEST_F(ConfigConsistencyTest, ConfigTabsMatchDocumentationSections) {

@@ -534,14 +534,12 @@ namespace config {
 
     20,  // fecPercentage
 
-    ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
-    ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
+    ENCRYPTION_MODE_MANDATORY,  // lan_encryption_mode
+    ENCRYPTION_MODE_MANDATORY,  // wan_encryption_mode
 
-    // Adaptive streaming — opt-in. These default OFF: frame_pacing injects
-    // up to max_pacing_buffer_ms of sleep on the video send thread per frame,
-    // thermal_protection silently steps down resolution/fps, and the NVENC
-    // bitrate reconfigure path is intentionally hard-refused, so leave the
-    // suite off until a user explicitly enables it in the web UI.
+    // Adaptive streaming defaults OFF. Frame pacing and adaptive FEC remain
+    // opt-in; adaptive bitrate and thermal protection are forced off below
+    // until their encoder-thread reconfiguration paths are implemented.
     false,  // adaptive_bitrate
     false,  // adaptive_fec
     false,  // frame_pacing
@@ -554,7 +552,7 @@ namespace config {
     1080,   // thermal_step_down_resolution
     30,     // thermal_step_down_fps
     30,     // thermal_recovery_delay_s
-    true,   // smart_reconnect
+    false,  // smart_reconnect (forced off until peer reauthentication exists)
     30,     // smart_reconnect_timeout_s
     false,  // smart_reconnect_legacy_ip_match (off by default — see config.h)
     2,      // max_suspended_sessions
@@ -605,7 +603,6 @@ namespace config {
   sunshine_t sunshine {
     false, // hide_tray_controls
     true, // enable_pairing
-    true, // pin_required (default: on)
     true, // enable_discovery
     false, // envvar_compatibility_mode
     "en",  // locale
@@ -1273,10 +1270,23 @@ namespace config {
     int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
 
     // Adaptive streaming
-    bool_f(vars, "adaptive_bitrate", stream.adaptive_bitrate);
+    bool requested_adaptive_bitrate = false;
+    bool_f(vars, "adaptive_bitrate", requested_adaptive_bitrate);
     bool_f(vars, "adaptive_fec", stream.adaptive_fec);
     bool_f(vars, "frame_pacing", stream.frame_pacing);
-    bool_f(vars, "thermal_protection", stream.thermal_protection);
+    bool requested_thermal_protection = false;
+    bool_f(vars, "thermal_protection", requested_thermal_protection);
+    if (requested_adaptive_bitrate) {
+      BOOST_LOG(warning) << "adaptive_bitrate is disabled: encoder-thread reconfiguration is not implemented"sv;
+    }
+    if (requested_thermal_protection) {
+      BOOST_LOG(warning) << "thermal_protection is disabled: encoder resolution/FPS reconfiguration is not implemented"sv;
+    }
+    // Fail closed instead of publishing target values or acknowledgements for
+    // encoder changes that never happened. These settings remain parseable for
+    // compatibility with existing sunshine.conf files but cannot be enabled.
+    stream.adaptive_bitrate = false;
+    stream.thermal_protection = false;
     int_between_f(vars, "min_bitrate", stream.min_bitrate, {500, 100000});
     int_between_f(vars, "max_bitrate_adaptive", stream.max_bitrate, {1000, 200000});
     int_between_f(vars, "min_fec_percentage", stream.min_fec_percentage, {1, 100});
@@ -1285,9 +1295,16 @@ namespace config {
     int_between_f(vars, "thermal_step_down_resolution", stream.thermal_step_down_resolution, {480, 2160});
     int_between_f(vars, "thermal_step_down_fps", stream.thermal_step_down_fps, {15, 120});
     int_between_f(vars, "thermal_recovery_delay_s", stream.thermal_recovery_delay_s, {5, 300});
-    bool_f(vars, "smart_reconnect", stream.smart_reconnect);
+    bool requested_smart_reconnect = false;
+    bool_f(vars, "smart_reconnect", requested_smart_reconnect);
     int_between_f(vars, "smart_reconnect_timeout_s", stream.smart_reconnect_timeout_s, {5, 300});
-    bool_f(vars, "smart_reconnect_legacy_ip_match", stream.smart_reconnect_legacy_ip_match);
+    bool requested_legacy_reconnect = false;
+    bool_f(vars, "smart_reconnect_legacy_ip_match", requested_legacy_reconnect);
+    if (requested_smart_reconnect || requested_legacy_reconnect) {
+      BOOST_LOG(warning) << "Smart reconnect is disabled until replacement peers are cryptographically authenticated"sv;
+    }
+    stream.smart_reconnect = false;
+    stream.smart_reconnect_legacy_ip_match = false;
     int_between_f(vars, "max_suspended_sessions", stream.max_suspended_sessions, {0, 10});
     bool_f(vars, "wifi_quality_signaling", stream.wifi_quality_signaling);
     int_between_f(vars, "wifi_preemptive_drop_threshold", stream.wifi_preemptive_drop_threshold, {1, 4});
@@ -1352,7 +1369,11 @@ namespace config {
     bool_f(vars, "system_tray", sunshine.system_tray);
     bool_f(vars, "hide_tray_controls", sunshine.hide_tray_controls);
     bool_f(vars, "enable_pairing", sunshine.enable_pairing);
-    bool_f(vars, "pin_required", sunshine.pin_required);
+    bool requested_skip_pin = true;
+    bool_f(vars, "pin_required", requested_skip_pin);
+    if (!requested_skip_pin) {
+      BOOST_LOG(warning) << "Ignoring pin_required=disabled: interactive PIN confirmation is mandatory"sv;
+    }
     bool_f(vars, "enable_discovery", sunshine.enable_discovery);
     bool_f(vars, "envvar_compatibility_mode", sunshine.envvar_compatibility_mode);
     bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);

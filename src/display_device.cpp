@@ -368,7 +368,11 @@ namespace display_device {
         case refresh_rate_option_e::automatic:
           {
             if (session.fps >= 0) {
-              config.m_refresh_rate = Rational {static_cast<unsigned int>(session.fps), 1000};
+              // Launch sessions normally store FPS in thousandths (60000 for
+              // 60 Hz), but web and legacy callers may supply whole Hz. Keep
+              // both representations valid instead of turning 60 into 0.06.
+              const unsigned int denominator = session.fps >= 1000 ? 1000 : 1;
+              config.m_refresh_rate = Rational {static_cast<unsigned int>(session.fps), denominator};
             } else {
               BOOST_LOG(error) << "FPS value provided by client session config is invalid: " << session.fps;
               return false;

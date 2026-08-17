@@ -37,7 +37,9 @@
   #include <atomic>
   #include <chrono>
   #include <csignal>
+  #include <deque>
   #include <format>
+  #include <mutex>
   #include <string>
   #include <thread>
 
@@ -66,6 +68,33 @@ namespace system_tray {
   static std::thread tray_thread;
   static std::atomic tray_thread_running = false;
   static std::atomic tray_thread_should_exit = false;
+
+  enum class tray_command_e {
+    playing,
+    pausing,
+    stopped,
+    launch_error,
+    require_pin,
+    paired,
+    client_connected,
+  };
+
+  struct tray_command_t {
+    tray_command_e type;
+    std::string text;
+    int exit_code = 0;
+  };
+
+  static std::mutex tray_command_mutex;
+  static std::deque<tray_command_t> tray_commands;
+
+  void enqueue_tray_command(tray_command_t command) {
+    std::lock_guard lock(tray_command_mutex);
+    if (!tray_initialized.load(std::memory_order_acquire)) {
+      return;
+    }
+    tray_commands.emplace_back(std::move(command));
+  }
 
   void tray_open_ui_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Opening UI from system tray"sv;
@@ -240,10 +269,14 @@ namespace system_tray {
       tray_initialized = false;
       tray_exit();
     }
+    {
+      std::lock_guard lock(tray_command_mutex);
+      tray_commands.clear();
+    }
     return 0;
   }
 
-  void update_tray_playing(std::string app_name) {
+  static void apply_tray_playing(const std::string &app_name) {
     if (!tray_initialized) {
       return;
     }
@@ -272,7 +305,7 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void update_tray_pausing(std::string app_name) {
+  static void apply_tray_pausing(const std::string &app_name) {
     if (!tray_initialized) {
       return;
     }
@@ -296,7 +329,7 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void update_tray_stopped(std::string app_name) {
+  static void apply_tray_stopped(const std::string &app_name) {
     if (!tray_initialized) {
       return;
     }
@@ -321,8 +354,8 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void
-  update_tray_launch_error(std::string app_name, int exit_code) {
+  static void
+  apply_tray_launch_error(const std::string &app_name, int exit_code) {
     if (!tray_initialized) {
       return;
     }
@@ -350,7 +383,7 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void update_tray_require_pin() {
+  static void apply_tray_require_pin() {
     if (!tray_initialized) {
       return;
     }
@@ -372,8 +405,8 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void
-  update_tray_paired(std::string device_name) {
+  static void
+  apply_tray_paired(const std::string &device_name) {
     if (!tray_initialized) {
       return;
     }
@@ -395,8 +428,8 @@ namespace system_tray {
     tray_update(&tray);
   }
 
-  void
-  update_tray_client_connected(std::string client_name) {
+  static void
+  apply_tray_client_connected(const std::string &client_name) {
     if (!tray_initialized) {
       return;
     }
@@ -419,6 +452,68 @@ namespace system_tray {
     tray_update(&tray);
   }
 
+  static void process_pending_tray_commands() {
+    std::deque<tray_command_t> pending;
+    {
+      std::lock_guard lock(tray_command_mutex);
+      pending.swap(tray_commands);
+    }
+
+    for (const auto &command : pending) {
+      switch (command.type) {
+        case tray_command_e::playing:
+          apply_tray_playing(command.text);
+          break;
+        case tray_command_e::pausing:
+          apply_tray_pausing(command.text);
+          break;
+        case tray_command_e::stopped:
+          apply_tray_stopped(command.text);
+          break;
+        case tray_command_e::launch_error:
+          apply_tray_launch_error(command.text, command.exit_code);
+          break;
+        case tray_command_e::require_pin:
+          apply_tray_require_pin();
+          break;
+        case tray_command_e::paired:
+          apply_tray_paired(command.text);
+          break;
+        case tray_command_e::client_connected:
+          apply_tray_client_connected(command.text);
+          break;
+      }
+    }
+  }
+
+  void update_tray_playing(std::string app_name) {
+    enqueue_tray_command({tray_command_e::playing, std::move(app_name)});
+  }
+
+  void update_tray_pausing(std::string app_name) {
+    enqueue_tray_command({tray_command_e::pausing, std::move(app_name)});
+  }
+
+  void update_tray_stopped(std::string app_name) {
+    enqueue_tray_command({tray_command_e::stopped, std::move(app_name)});
+  }
+
+  void update_tray_launch_error(std::string app_name, int exit_code) {
+    enqueue_tray_command({tray_command_e::launch_error, std::move(app_name), exit_code});
+  }
+
+  void update_tray_require_pin() {
+    enqueue_tray_command({tray_command_e::require_pin});
+  }
+
+  void update_tray_paired(std::string device_name) {
+    enqueue_tray_command({tray_command_e::paired, std::move(device_name)});
+  }
+
+  void update_tray_client_connected(std::string client_name) {
+    enqueue_tray_command({tray_command_e::client_connected, std::move(client_name)});
+  }
+
   // Threading functions available on all platforms
   static void tray_thread_worker() {
     BOOST_LOG(info) << "System tray thread started"sv;
@@ -426,6 +521,7 @@ namespace system_tray {
     // Initialize the tray in this thread
     if (init_tray() != 0) {
       BOOST_LOG(error) << "Failed to initialize tray in thread"sv;
+      tray_thread_should_exit = true;
       tray_thread_running = false;
       return;
     }
@@ -434,6 +530,7 @@ namespace system_tray {
 
     // Main tray event loop
     while (!tray_thread_should_exit) {
+      process_pending_tray_commands();
       if (process_tray_events() != 0) {
         BOOST_LOG(warning) << "Tray event processing failed in thread"sv;
         break;
@@ -456,6 +553,16 @@ namespace system_tray {
     }
 
   #ifdef _WIN32
+    DWORD session_id = 0;
+    if (ProcessIdToSessionId(GetCurrentProcessId(), &session_id) && session_id == 0) {
+      // Services run in non-interactive session 0, where Explorer and its
+      // notification area do not exist. Waiting for GetShellWindow() here can
+      // only time out and has produced a false startup error on every service
+      // launch. The per-user helper owns interactive UI instead.
+      BOOST_LOG(info) << "System tray disabled for non-interactive service session 0"sv;
+      return 0;
+    }
+
     std::string tmp_str = "Open Apollo (" + config::nvhttp.sunshine_name + ":" + std::to_string(net::map_port(confighttp::PORT_HTTPS)) + ")";
     static const std::string title_str = utf8ToAcp(tmp_str);
   #else
@@ -505,18 +612,22 @@ namespace system_tray {
   }
 
   int end_tray_threaded() {
-    if (!tray_thread_running) {
-      return 0;
+    const bool was_running = tray_thread_running;
+    if (was_running) {
+      BOOST_LOG(info) << "Stopping system tray thread"sv;
     }
-
-    BOOST_LOG(info) << "Stopping system tray thread"sv;
     tray_thread_should_exit = true;
 
+    // A worker can exit on its own after a tray-loop failure. The std::thread
+    // remains joinable even though tray_thread_running is already false, and
+    // allowing its static destructor to see that state would call terminate().
     if (tray_thread.joinable()) {
       tray_thread.join();
     }
 
-    BOOST_LOG(info) << "System tray thread stopped"sv;
+    if (was_running) {
+      BOOST_LOG(info) << "System tray thread stopped"sv;
+    }
     return 0;
   }
 

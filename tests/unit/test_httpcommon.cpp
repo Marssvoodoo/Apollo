@@ -7,8 +7,11 @@
 
 // lib imports
 #include <curl/curl.h>
+#include <nlohmann/json.hpp>
+#include <filesystem>
 
 // local imports
+#include <src/file_handler.h>
 #include <src/httpcommon.h>
 
 struct UrlEscapeTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
@@ -27,6 +30,28 @@ INSTANTIATE_TEST_SUITE_P(
     std::make_tuple("..*\\", "..%2A%5C")
   )
 );
+
+TEST(UserCredentialsTest, SaveMigratesToV3AndPreservesPairingState) {
+  const auto file = (std::filesystem::temp_directory_path() / "apollo-test-state.json").string();
+  const nlohmann::json original {
+    {"root", {{"uniqueid", "paired-device-state"}}},
+    {"username", "legacy"},
+    {"salt", "legacy-salt"},
+    {"password", http::hash_password("old-password", "legacy-salt", 1)},
+  };
+  ASSERT_EQ(file_handler::write_private_file(file.c_str(), original.dump(2)), 0);
+
+  ASSERT_EQ(http::save_user_creds(file, "admin", "new-password"), 0);
+  const auto migrated = nlohmann::json::parse(file_handler::read_file(file.c_str()));
+  EXPECT_EQ(migrated.at("hash_version").get<int>(), http::CURRENT_HASH_VERSION);
+  EXPECT_EQ(migrated.at("username").get<std::string>(), "admin");
+  EXPECT_EQ(migrated.at("root").at("uniqueid").get<std::string>(), "paired-device-state");
+  EXPECT_EQ(
+    migrated.at("password").get<std::string>(),
+    http::hash_password("new-password", migrated.at("salt").get<std::string>(), http::CURRENT_HASH_VERSION));
+
+  std::filesystem::remove(file);
+}
 
 struct UrlGetHostTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
 

@@ -1,5 +1,68 @@
 # Apollo Security & Performance Hardening Changelog
 
+## 2026-08-17 — Review remediation and production hardening
+
+This release closes the confirmed security, lifetime, persistence, and
+configuration defects found in the current Apollo review. The implementation
+deliberately disables incomplete features instead of advertising behavior the
+encoder or reconnect protocol cannot safely provide.
+
+### Authentication and secret storage
+
+- Client certificate verification no longer accepts a leaf signed by an
+  unknown issuer; TLS session tickets and server-side session caching are off
+  so every connection repeats Apollo's current pairing-state check.
+- Persistent fixed-PIN (`0000`) auto-pairing and its web control are removed.
+  Pairing now always requires operator PIN confirmation, while pending pairing
+  sessions expire and are capped globally and per source address.
+- Initial administrator creation is restricted to a request originating on the
+  Apollo host. Authenticated state-changing routes retain session and CSRF
+  checks.
+- Credential migration upgrades a verified legacy password to PBKDF2-HMAC-
+  SHA256 v3 without losing pairing data. Digest/RNG provider failures terminate
+  instead of returning predictable authentication material.
+- Private keys and state/credential files use flushed atomic replacement and
+  owner/SYSTEM/Administrators-only access on Windows (`0600` on POSIX).
+
+### Streaming and lifecycle correctness
+
+- Audio/video packets retain shared ownership of their channel/session state;
+  consumers discard packets after a session stops instead of dereferencing raw
+  lifetime pointers.
+- Control payload sizes and alignment are checked before reads, malformed loss
+  reports are ignored, WiFi reports are clamped/rate-limited, launch surfaces
+  are bounded to an 8K-sized pixel budget, and configured reconnect/session
+  deadlines are enforced.
+- Smart reconnect is forced off until a replacement peer performs a
+  proof-of-possession challenge over the existing session key. Source-IP and
+  32-bit-token matching are not treated as authentication.
+- Process mutations are serialized outside movable `proc_t`; tray changes are
+  queued to the tray worker; stale delayed display tasks are invalidated; and
+  pre-stream display topology is persisted and recovered after an unclean exit.
+
+### Truthful configuration and dependencies
+
+- `POST /api/config` accepts only options consumed by the parser, rejects the
+  whole request with HTTP 400 for unknown/injected keys, and returns HTTP 500
+  if its atomic file write fails. Consistency tests keep the parser, web UI,
+  documentation, and allowlist synchronized.
+- Adaptive bitrate and thermal resolution/FPS controls remain parse-compatible
+  but are forced off until encoder-thread reconfiguration exists; fake
+  acknowledgements and misleading telemetry were removed.
+- LAN and WAN encryption defaults are mandatory. Version generation includes
+  the source commit instead of falling back to `0.0.0.dirty`.
+- Web dependencies were upgraded and audited: 219 dependencies, 0 known
+  critical/high/moderate/low vulnerabilities on 2026-08-17.
+
+### Verification
+
+- Native Windows UCRT64 build: `sunshine.exe` and `test_sunshine.exe` linked.
+- Frontend production build: 143 modules transformed successfully.
+- Test suite: 248 tests; 241 passed; 7 skipped (two unavailable encoders, four
+  Windows mouse TODOs, one expected-fail command that passed); 0 failed.
+
+---
+
 ## Round 2 — Tier A/B/C/H + Adaptive Suite (commits a09a2bb..861df50)
 
 Second wave of hardening on top of the original 61-fix Round 1 baseline.

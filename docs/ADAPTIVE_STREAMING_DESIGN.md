@@ -1,5 +1,15 @@
 # Apollo Adaptive Streaming Suite — Design Document
 
+> **Implementation status (2026-08-16):** This document describes a proposed
+> architecture, not a production-ready feature contract. Adaptive bitrate and
+> thermal protection are forced off at configuration load because the current
+> encoder path does not safely apply runtime bitrate or resolution changes.
+> Frame pacing and adaptive FEC remain separately configurable. Do not enable
+> adaptive bitrate or thermal protection until the encoder reconfiguration and
+> client-observable acceptance tests in this document are implemented. Smart
+> reconnect is also forced off until a replacement peer proves possession of
+> the existing session key before Apollo swaps the live control connection.
+
 **Date:** 2026-03-29
 **Target:** Hisense 75U7N (MediaTek SoC, WiFi 6E, Android TV) via Moonlight
 **Server:** Apollo/Sunshine fork on Windows, RTX 5080 (NVENC)
@@ -291,7 +301,12 @@ send_wifi_quality = true
 
 ---
 
-## Feature 6: Smart Reconnect (Custom Moonlight)
+## Feature 6: Smart Reconnect (Custom Moonlight) — Disabled Prototype
+
+The current source retains the prototype state machine for future development,
+but configuration loading forces it off. Matching only a 32-bit connection
+token (or a source IP for legacy clients) does not authenticate a replacement
+peer and can hand an attacker the suspended session's keys and permissions.
 
 ### Server — Session Suspension
 
@@ -304,7 +319,8 @@ on peer_disconnect:
     // Start 30s timeout timer
 
 on new_peer_connect:
-  if connect_data matches suspended session:
+  if connect_data matches suspended session
+     and peer proves possession of the session key over a fresh server nonce:
     session->state = RUNNING
     session->control.peer = new_peer
     request_idr_frame()  // client can decode immediately
@@ -327,12 +343,14 @@ on connection_lost:
   // Failed — show "Connection lost" dialog
 ```
 
-### Security
+### Security gate before enablement
 
-- Same AES-GCM keys (no re-pairing)
-- connect_data validation (32-bit random from RTSP)
-- 30s timeout (auto-cleanup)
-- Max 2 suspended sessions
+- Issue a fresh, single-use server nonce to the reconnecting peer.
+- Require an authenticated response using the existing session key before
+  changing `control.peer` or exposing any session state.
+- Rate-limit failed proofs by source prefix and expire every nonce.
+- Never fall back to source-IP matching.
+- Retain the 30-second cleanup deadline and suspended-session capacity limit.
 
 ### Files
 
@@ -347,10 +365,8 @@ on connection_lost:
 ### Config
 
 ```
-# Apollo
-smart_reconnect = enabled
-smart_reconnect_timeout_s = 30
-max_suspended_sessions = 2
+# Apollo (future; currently forced off)
+smart_reconnect = disabled
 
 # Moonlight
 smart_reconnect = true
@@ -364,8 +380,8 @@ reconnect_backoff_ms = 500
 
 | Server | Client | Features Available |
 |--------|--------|--------------------|
-| Apollo | Stock Moonlight | F1 + F2 + F3 (full server-side suite) |
-| Apollo | Custom Moonlight | F1 + F2 + F3 + F4 + F5 + F6 (all features) |
+| Apollo | Stock Moonlight | Adaptive FEC and frame pacing when explicitly enabled; fixed bitrate/resolution |
+| Apollo | Custom Moonlight | Same server features plus telemetry; smart reconnect remains disabled |
 | Stock Sunshine | Custom Moonlight | Client overlay shows local stats only, reconnect attempts fail gracefully |
 
 ---

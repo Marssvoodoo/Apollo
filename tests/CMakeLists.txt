@@ -67,6 +67,7 @@ add_executable(${PROJECT_NAME}
 # Using configure_file ensures files are copied when they change between builds
 set(INTEGRATION_TEST_FILES
     "src/config.cpp"
+    "src/confighttp.cpp"
     "src_assets/common/assets/web/config.html"
     "docs/configuration.md"
     "src_assets/common/assets/web/public/assets/locale/en.json"

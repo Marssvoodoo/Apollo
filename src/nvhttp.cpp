@@ -20,6 +20,7 @@
 
 // lib includes
 #include <openssl/crypto.h>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/context_base.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -728,7 +729,9 @@ namespace nvhttp {
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
 
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << val;
+      const bool sensitive = boost::iequals(name, "Authorization") || boost::iequals(name, "Cookie") ||
+                             boost::iequals(name, "Set-Cookie") || boost::iequals(name, "X-CSRF-Token");
+      BOOST_LOG(debug) << name << " -- " << (sensitive ? "[REDACTED]"sv : std::string_view(val));
     }
 
     BOOST_LOG(debug) << " [--] "sv;

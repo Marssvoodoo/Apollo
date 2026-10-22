@@ -108,7 +108,9 @@ namespace confighttp {
     BOOST_LOG(debug) << "METHOD :: "sv << request->method;
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << (name == "Authorization" ? "CREDENTIALS REDACTED" : val);
+      const bool sensitive = boost::iequals(name, "Authorization") || boost::iequals(name, "Cookie") ||
+                             boost::iequals(name, "Set-Cookie") || boost::iequals(name, "X-CSRF-Token");
+      BOOST_LOG(debug) << name << " -- " << (sensitive ? "[REDACTED]"sv : std::string_view(val));
     }
     BOOST_LOG(debug) << " [--] "sv;
     for (auto &[name, val] : request->parse_query_string()) {
@@ -175,15 +177,22 @@ namespace confighttp {
    * @return The value if found, empty string otherwise.
    */
   std::string getCookieValue(const std::string& cookieString, const std::string& key) {
-    std::string keyWithEqual = key + "=";
-    std::size_t startPos = cookieString.find(keyWithEqual);
-    if (startPos == std::string::npos)
-      return "";
-    startPos += keyWithEqual.length();
-    std::size_t endPos = cookieString.find(";", startPos);
-    if (endPos == std::string::npos)
-      return cookieString.substr(startPos);
-    return cookieString.substr(startPos, endPos - startPos);
+    std::string_view remaining {cookieString};
+    while (!remaining.empty()) {
+      const auto end = remaining.find(';');
+      auto cookie = remaining.substr(0, end);
+      const auto name_start = cookie.find_first_not_of(" \t");
+      if (name_start != std::string_view::npos) {
+        cookie.remove_prefix(name_start);
+        const auto equals = cookie.find('=');
+        if (equals != std::string_view::npos && cookie.substr(0, equals) == key) {
+          return std::string(cookie.substr(equals + 1));
+        }
+      }
+      if (end == std::string_view::npos) break;
+      remaining.remove_prefix(end + 1);
+    }
+    return {};
   }
 
   /**
@@ -1435,8 +1444,12 @@ namespace confighttp {
           if (newPassword.empty() || newPassword != confirmPassword)
             errors.push_back("Password Mismatch");
           else {
-            http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword);
-            http::reload_user_creds(config::sunshine.credentials_file);
+            std::lock_guard state_lock(http::state_file_mutex());
+            if (http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword) != 0 ||
+                http::reload_user_creds(config::sunshine.credentials_file) != 0) {
+              internal_server_error(response, "Unable to save administrator credentials");
+              return;
+            }
             {
               std::lock_guard<std::mutex> lock(session_mutex);
               sessionCookie.clear(); // force re-login

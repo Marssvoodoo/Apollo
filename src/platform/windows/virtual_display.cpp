@@ -44,21 +44,21 @@ namespace {
 	bool restore_topology(
 		std::vector<DISPLAYCONFIG_PATH_INFO>& paths,
 		std::vector<DISPLAYCONFIG_MODE_INFO>& modes,
-		const char *source
+		const char *source,
+		bool validate_only = false
 	) {
 		LONG status = SetDisplayConfig(
 			static_cast<UINT32>(paths.size()),
 			paths.data(),
 			static_cast<UINT32>(modes.size()),
 			modes.data(),
-			SDC_APPLY
+			(validate_only ? SDC_VALIDATE : (SDC_APPLY | SDC_SAVE_TO_DATABASE))
 			| SDC_USE_SUPPLIED_DISPLAY_CONFIG
-			| SDC_ALLOW_PATH_ORDER_CHANGES
-			| SDC_SAVE_TO_DATABASE
 		);
 
 		if (status == ERROR_SUCCESS) {
-			BOOST_LOG(info) << "[SUDOVDA] display_topology_snapshot: " << source << " topology restored.";
+			BOOST_LOG(info) << "[SUDOVDA] display_topology_snapshot: " << source
+			                << (validate_only ? " topology validated." : " topology restored.");
 			return true;
 		}
 
@@ -77,6 +77,16 @@ namespace {
 		return true;
 	}
 }  // namespace
+
+#ifdef SUNSHINE_TESTS
+// Exercise the real restoration flags without changing the user's displays.
+bool validate_topology_restore(
+	std::vector<DISPLAYCONFIG_PATH_INFO>& paths,
+	std::vector<DISPLAYCONFIG_MODE_INFO>& modes
+) {
+	return restore_topology(paths, modes, "validation", true);
+}
+#endif
 
 // {dff7fd29-5b75-41d1-9731-b32a17a17104}
 // static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };

@@ -2,13 +2,15 @@
   "name": "sunshine",
   "version": "0.0.0",
   "scripts": {
-    "build": "vite build --debug",
-    "build-clean": "vite build --debug --emptyOutDir",
+    "build": "vite build --debug && node tools/check-web-assets.mjs",
+    "build-clean": "vite build --debug --emptyOutDir && node tools/check-web-assets.mjs",
+    "check:web-assets": "node tools/check-web-assets.mjs",
     "dev": "vite build --watch",
     "serve": "serve ./tests/fixtures/http --no-port-switching"
   },
   "type": "module",
   "dependencies": {
+    "@fortawesome/fontawesome-free": "7.0.1",
     "@lizardbyte/shared-web": "2026.812.190302",
     "vue": "3.5.41",
     "vue-i18n": "11.4.8"

@@ -1,7 +1,7 @@
 # Apollo regression review
 
 Version: 1
-Status: code verified; release preparation
+Status: code review fixes pushed, installed and verified; hardware acceptance remains
 
 ## Contract
 
@@ -34,8 +34,8 @@ feature development are outside this review.
 - [x] Verify exact cookie-name parsing and confidential request-header redaction.
 - [x] Include the missing config fixture and run native regression/build checks.
 - [x] Inject at least four realistic regressions in scratch copies; require failures.
-- [ ] Inspect final diff, scan staged changes, commit and push to the fork.
-- [ ] Package binary/assets, preserve rollback, install when authorized access is
+- [x] Inspect final diff, scan staged changes, commit and push to the fork.
+- [x] Package binary/assets, preserve rollback, install when authorized access is
   available, verify process/listeners/endpoints/hashes. Never interrupt an active
   stream. If permissions prevent installation, retain the tested candidate and
   report the exact incomplete boundary.
@@ -101,3 +101,54 @@ https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdispla
 
 Real TV reconnect, controllers and monitor/HDR restoration after a stream remain
 hardware acceptance items, not conclusions from the native suite.
+
+## Installation and browser follow-up
+
+- Native source `32590c1806e27b442b96e31227b86fedfb9fc4a0` was pushed to fork
+  master and rebuilt as `1.1.1.32590c1`. Installed SHA256:
+  `90f9a8a15b04e55986cf56bad2892ae35f11e4bd637e94df900d8813c9ad0e57`.
+- The hidden elevated transaction succeeded. New process 84668 started at
+  2026-10-21 22:16:35 CDT. Binary and all 112 materialized assets matched the
+  candidate. Existing configuration/pairing file contents retained their hashes.
+  Rollback: `C:/Program Files/Apollo/backups/regression-review-20261021`.
+- Nineteen installed-runtime checks pass (`runtime-checks.json`): login and its
+  bundled asset bytes, unauthenticated protected API requests, login redirect,
+  untrusted GameStream client certificate rejection, and actual redaction in
+  both web and GameStream request logs.
+- The separate real browser check found a missing Font Awesome stylesheet despite
+  Vite exiting successfully. The newer shared-web dependency no longer supplies
+  Font Awesome transitively, but every page still references its package CSS.
+  Added explicit `@fortawesome/fontawesome-free` version 7.0.1, recovered from
+  the prior installed stylesheet. The exact npm registry tarball was unpacked
+  without running package scripts; direct dependency is now in package.json.
+- The production build now checks all eight HTML entry points and every linked
+  stylesheet, script, preload, icon and CSS font asset. Before repair the check
+  fails on the missing package URL. After repair it validates 24 referenced
+  assets, including the required font faces. Four scratch mutations (missing
+  stylesheet, script, font, page) all fail (`web-mutations/results.json`).
+- Final web commit `ba2a164294fd0185fa3ba863b69109b51874a7b5` is pushed and
+  installed. The verified native source and executable are unchanged. All 116
+  manifested files (executable plus 115 assets) match the final package.
+  `web-deployment.json` records the guarded asset-only activation; the original
+  native process remains running. Configuration content hashes remain unchanged.
+- Final real browser check: login form visible and enabled, Font Awesome 7 Free
+  face loaded, zero JavaScript errors, zero failed requests and zero HTTP errors.
+  Evidence: `browser-final.json`, `installed-login-final.png`. Nineteen runtime
+  checks still pass; the packaged-asset checker also passes against the live
+  installation itself. No actual user credentials were submitted or changed.
+- Self-contained final archive:
+  `L:/Coding/_scratch/apollo-review-20261021/Apollo-32590c1-ba2a164-Windows-local.zip`,
+  SHA256 `b250d9d4de21fa563c6542d1d91e6a93b73343c1932e60fd50d36c0a430bd55f`.
+  CMake's shader junction is materialized inside the archive. The earlier failed
+  candidate and all scratch reproductions remain available as evidence.
+
+## Remaining limits
+
+- No physical Artemis/TV connection, real controller input, streamed audio/video,
+  or full display/HDR teardown cycle was exercised in this preventive review.
+- The npm dependency advisory service rejected the existing tree; this is an
+  audit coverage gap, not a clean bill of health. Existing known disabled encoder
+  reconfiguration/reconnect features were not enabled.
+- Pre-existing .gitignore changes and unrelated untracked review/harness files
+  were preserved. No driver, firewall, encoder tuning, app definition or live
+  credential changes were made. Sol performed all work directly.
